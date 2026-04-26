@@ -145,10 +145,11 @@ Claude Code と VS2022 はどちらもソリューション／プロジェクト
 ```
 {VaultRoot}/
 ├── .MCPVault/
-│   ├── mcp_config.json   # 設定ファイル（自動生成・手直し可）
-│   ├── notes.db          # インデックス DB
-│   └── .log/             # ログファイル
-└── README.md             # ウェルカムノート（存在しない場合のみ生成）
+│   ├── mcp_config.json      # 設定ファイル（自動生成・手直し可）
+│   ├── notes.db             # ノートインデックス DB
+│   ├── KnowledgeCell.db     # KnowledgeCell DB
+│   └── .log/                # ログファイル
+└── README.md                # ウェルカムノート（存在しない場合のみ生成）
 ```
 
 ### 設定ファイル（mcp_config.json）
@@ -195,7 +196,7 @@ Vault 内のノート一覧をパスとタイムスタンプ付きで返す。
 |-----------|-----|------|------|
 | `count` | number | 任意 | 取得件数（1〜100、デフォルト 10） |
 
-#### `search_notes`
+#### `search_notes`（エイリアス: `search_vault`）
 FTS5 trigram による全文検索。日本語・英語対応。検索結果にスニペット（前後文脈）が含まれる。
 
 | パラメータ | 型 | 必須 | 説明 |
@@ -295,11 +296,46 @@ FTS5 trigram による全文検索。日本語・英語対応。検索結果に�
 
 ---
 
+### KnowledgeCell
+
+AI がセッションをまたいで情報を保持するための軽量な KV ストア。Vault のノートとは独立した SQLite DB（`KnowledgeCell.db`）に保存される。
+
+#### `kcell_write`
+キーと値を指定セルに書き込む。セルが存在しない場合は自動作成。同じキーへの再書き込みは上書き（upsert）。
+
+| パラメータ | 型 | 必須 | 説明 |
+|-----------|-----|------|------|
+| `cell_name` | string | 必須 | セル名（例: `quick`, `session`, `novel`）。自動作成される |
+| `key` | string | 必須 | キー |
+| `value` | string | 必須 | 保存する値 |
+
+#### `kcell_read`
+セルからエントリを読み込む。
+
+| パラメータ | 型 | 必須 | 説明 |
+|-----------|-----|------|------|
+| `cell_name` | string | 必須 | セル名 |
+| `key` | string | 任意 | 読み込むキー。省略時はセル内全エントリを更新日時降順で返す |
+| `latest` | bool | 任意 | `true` で最も最近書き込まれた 1 件のみ返す（デフォルト: `false`） |
+
+#### `kcell_delete`
+セルからキーを削除する。キー省略時はセル全体（全キー）を削除。
+
+| パラメータ | 型 | 必須 | 説明 |
+|-----------|-----|------|------|
+| `cell_name` | string | 必須 | セル名 |
+| `key` | string | 任意 | 削除するキー。省略時はセル全体を削除 |
+
+#### `kcell_list`
+全セルをキー数・最終更新タイムスタンプとともに返す。パラメータなし。
+
+---
+
 ## インデックス（SQLite）
 
-DB ファイル: `{VaultRoot}/.MCPVault/notes.db`
+### notes.db
 
-### テーブル構成
+DB ファイル: `{VaultRoot}/.MCPVault/notes.db`
 
 | テーブル | 用途 |
 |---------|------|
@@ -309,6 +345,14 @@ DB ファイル: `{VaultRoot}/.MCPVault/notes.db`
 | `note_headings` | 見出し（レベル・テキスト） |
 | `note_aliases` | `aliases` フィールドの値 |
 | `excluded_folders` | インデックス対象外フォルダ |
+
+### KnowledgeCell.db
+
+DB ファイル: `{VaultRoot}/.MCPVault/KnowledgeCell.db`
+
+| テーブル | 用途 |
+|---------|------|
+| `knowledge_cells` | セル名・キー・値・更新タイムスタンプ（`(cell_name, key)` が主キー） |
 
 ### インデックス更新タイミング
 

@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.IO.Ports;
+using System.Reflection;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
@@ -8,6 +9,11 @@ using System.Text.RegularExpressions;
 
 // MCPVault - スタンドアロン MCP サーバー
 // Claude ↔ stdin/stdout ↔ [MCPVault] ↔ Obsidian Vault（ファイルシステム直接アクセス）
+
+var _asm = Assembly.GetExecutingAssembly();
+string AppVersion = _asm.GetName().Version?.ToString(3) ?? "0.0.0";
+string BuildDate  = _asm.GetCustomAttributes<AssemblyMetadataAttribute>()
+    .FirstOrDefault(a => a.Key == "BuildDate")?.Value ?? "unknown";
 
 // UTF-8 強制（Windows デフォルトは UTF-8 でないため MCP の JSON が壊れる）
 Console.InputEncoding  = Encoding.UTF8;
@@ -37,6 +43,7 @@ for (int i = 0; i < args.Length; i++)
 string? VAULT_PATH  = vaultArg ?? Environment.GetEnvironmentVariable("OBSIDIAN_VAULT_PATH") ?? @"C:\Vault";
 string mcpVaultDir  = Path.Combine(VAULT_PATH, ".MCPVault");
 string DB_PATH      = Path.Combine(mcpVaultDir, "notes.db");
+string KC_DB_PATH   = Path.Combine(mcpVaultDir, "KnowledgeCell.db");
 // セミコロン区切りで除外フォルダを追加可能 例: "Tools3;Private"
 string[] EXTRA_EXCLUDED = (Environment.GetEnvironmentVariable("MCP_EXCLUDED_FOLDERS") ?? "")
     .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -139,10 +146,14 @@ try
     Directory.CreateDirectory(Path.GetDirectoryName(errorLogPath)!);
     errorLogWriter = new StreamWriter(errorLogPath, append: true, Encoding.UTF8) { AutoFlush = true };
     var toolNames = GetToolNames();
-    errorLogWriter.WriteLine($"=== MCPVault 1.0.0  {DateTime.Now:yyyy-MM-dd HH:mm:ss} ===");
+    errorLogWriter.WriteLine($"=== MCPVault {AppVersion} (build {BuildDate})  {DateTime.Now:yyyy-MM-dd HH:mm:ss} ===");
     errorLogWriter.WriteLine($"    Tools({toolNames.Length}): {string.Join(", ", toolNames)}");
 }
 catch (Exception ex) { Console.Error.WriteLine($"Error log open failed: {ex.Message}"); }
+
+// KnowledgeCell DB を初期化
+try { using var kc = new KnowledgeCell(KC_DB_PATH); }
+catch (Exception ex) { Console.Error.WriteLine($"KnowledgeCell init error: {ex.Message}"); }
 
 // ウォッチャーを先に起動し、並行してフルスキャンを行う
 if (VAULT_PATH != null && Directory.Exists(VAULT_PATH))
@@ -170,7 +181,7 @@ while ((input = await Console.In.ReadLineAsync()) != null)
 
         if (method == "initialize")
         {
-            response = BuildInitializeResponse(id);
+            response = BuildInitializeResponse(id, AppVersion);
             Log(serial, logWriter, "[MCPVault] initialize");
         }
         else if (method?.StartsWith("notifications/") == true)
@@ -271,6 +282,25 @@ while ((input = await Console.In.ReadLineAsync()) != null)
                 "delete_empty_folder" => VAULT_PATH != null
                     ? BuildDeleteEmptyFolderResponse(id, pargs?["path"]?.GetValue<string>(), VAULT_PATH)
                     : BuildErrorResponse(id, "OBSIDIAN_VAULT_PATH が設定されていません。"),
+
+                "kcell_write" => BuildKcellWriteResponse(id,
+                    pargs?["cell_name"]?.GetValue<string>(),
+                    pargs?["key"]?.GetValue<string>(),
+                    pargs?["value"]?.GetValue<string>(),
+                    KC_DB_PATH),
+
+                "kcell_read" => BuildKcellReadResponse(id,
+                    pargs?["cell_name"]?.GetValue<string>(),
+                    pargs?["key"]?.GetValue<string>(),
+                    pargs?["latest"]?.GetValue<bool>() ?? false,
+                    KC_DB_PATH),
+
+                "kcell_delete" => BuildKcellDeleteResponse(id,
+                    pargs?["cell_name"]?.GetValue<string>(),
+                    pargs?["key"]?.GetValue<string>(),
+                    KC_DB_PATH),
+
+                "kcell_list" => BuildKcellListResponse(id, KC_DB_PATH),
 
                 _ => BuildErrorResponse(id, $"不明なツール: {toolName}")
             };
@@ -642,7 +672,7 @@ static void BuildVaultIndex(string vaultPath, string dbPath, string[] extraExclu
 }
 
 // initialize レスポンスを構築して返す
-static string BuildInitializeResponse(JsonNode? idNode)
+static string BuildInitializeResponse(JsonNode? idNode, string version = "0.0.0")
 {
     var jsonOptions = new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     var response = new JsonObject
@@ -660,7 +690,7 @@ static string BuildInitializeResponse(JsonNode? idNode)
             ["serverInfo"] = new JsonObject
             {
                 ["name"]    = "mcpvault",
-                ["version"] = "1.0.0",
+                ["version"] = version,
             }
         }
     };
@@ -941,6 +971,88 @@ static string BuildToolsListResponse(JsonNode? idNode)
                     }
                 },
                 "required": ["path"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "kcell_write",
+            "description": "Writes a key-value pair to a named KnowledgeCell. Creates the cell automatically if it does not exist. Useful for persisting notes, session state, or cross-session instructions.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cell_name": {
+                        "type": "string",
+                        "description": "Cell name (e.g. 'quick', 'session', 'novel'). Created automatically if absent."
+                    },
+                    "key": {
+                        "type": "string",
+                        "description": "Key"
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": "Value to store"
+                    }
+                },
+                "required": ["cell_name", "key", "value"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "kcell_read",
+            "description": "Reads one or all entries from a named KnowledgeCell. Omit key to retrieve all entries sorted by most recently updated. Set latest:true to return only the single most recently written entry.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cell_name": {
+                        "type": "string",
+                        "description": "Cell name"
+                    },
+                    "key": {
+                        "type": "string",
+                        "description": "Key to read. Omit to read all keys in the cell."
+                    },
+                    "latest": {
+                        "type": "boolean",
+                        "description": "If true, returns only the most recently updated entry regardless of key."
+                    }
+                },
+                "required": ["cell_name"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "kcell_delete",
+            "description": "Deletes a key from a KnowledgeCell, or deletes the entire cell and all its keys if key is omitted.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cell_name": {
+                        "type": "string",
+                        "description": "Cell name"
+                    },
+                    "key": {
+                        "type": "string",
+                        "description": "Key to delete. Omit to delete the entire cell."
+                    }
+                },
+                "required": ["cell_name"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "kcell_list",
+            "description": "Lists all KnowledgeCells with their key count and last updated timestamp.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
             }
         }
         """));
@@ -2037,6 +2149,184 @@ static bool IsPatternExcluded(string folder, bool exDot, bool exUnderscore, bool
         name.Equals(".mvn",         StringComparison.OrdinalIgnoreCase);
 }
 
+// kcell_write の JSON-RPC レスポンスを構築して返す
+static string BuildKcellWriteResponse(JsonNode? idNode, string? cellName, string? key, string? value, string dbPath)
+{
+    var jsonOptions = new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+    string text;
+    if (string.IsNullOrWhiteSpace(cellName) || string.IsNullOrWhiteSpace(key) || value is null)
+    {
+        text = "cell_name, key, value はすべて必須です。";
+    }
+    else
+    {
+        try
+        {
+            using var kc = new KnowledgeCell(dbPath);
+            kc.Write(cellName, key, value);
+            text = $"書き込みました: [{cellName}] {key}";
+        }
+        catch (Exception ex) { text = $"エラー: {ex.Message}"; }
+    }
+    var response = new JsonObject
+    {
+        ["jsonrpc"] = "2.0",
+        ["id"]      = idNode?.DeepClone(),
+        ["result"]  = new JsonObject
+        {
+            ["content"] = new JsonArray { new JsonObject { ["type"] = "text", ["text"] = text } }
+        }
+    };
+    return response.ToJsonString(jsonOptions);
+}
+
+// kcell_read の JSON-RPC レスポンスを構築して返す
+static string BuildKcellReadResponse(JsonNode? idNode, string? cellName, string? key, bool latest, string dbPath)
+{
+    var jsonOptions = new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+    string text;
+    if (string.IsNullOrWhiteSpace(cellName))
+    {
+        text = "cell_name は必須です。";
+    }
+    else
+    {
+        try
+        {
+            string? normKey = string.IsNullOrWhiteSpace(key) ? null : key;
+            using var kc = new KnowledgeCell(dbPath);
+
+            if (latest)
+            {
+                // 最終更新エントリを1件だけ返す（key指定は無視）
+                var entries = kc.Read(cellName, key: null).ToList();
+                if (entries.Count == 0)
+                    text = $"[{cellName}] にエントリはありません。";
+                else
+                {
+                    var (k, v, ua) = entries[0];
+                    var dt = DateTimeOffset.FromUnixTimeSeconds(ua).ToLocalTime();
+                    text = $"[{cellName}] 最新: {k} = {v}  ({dt:yyyy-MM-dd HH:mm:ss})";
+                }
+            }
+            else
+            {
+                var entries = kc.Read(cellName, normKey).ToList();
+                if (entries.Count == 0)
+                {
+                    text = normKey != null
+                        ? $"[{cellName}] キー「{normKey}」は存在しません。"
+                        : $"[{cellName}] にエントリはありません。";
+                }
+                else if (normKey != null)
+                {
+                    // 特定キー指定の場合は値のみ返す
+                    text = entries[0].Value;
+                }
+                else
+                {
+                    var sb = new StringBuilder();
+                    sb.AppendLine($"[{cellName}] {entries.Count}件:");
+                    foreach (var (k, v, ua) in entries)
+                    {
+                        var dt = DateTimeOffset.FromUnixTimeSeconds(ua).ToLocalTime();
+                        sb.AppendLine($"  {k} = {v}  ({dt:yyyy-MM-dd HH:mm:ss})");
+                    }
+                    text = sb.ToString().TrimEnd();
+                }
+            }
+        }
+        catch (Exception ex) { text = $"エラー: {ex.Message}"; }
+    }
+    var response = new JsonObject
+    {
+        ["jsonrpc"] = "2.0",
+        ["id"]      = idNode?.DeepClone(),
+        ["result"]  = new JsonObject
+        {
+            ["content"] = new JsonArray { new JsonObject { ["type"] = "text", ["text"] = text } }
+        }
+    };
+    return response.ToJsonString(jsonOptions);
+}
+
+// kcell_delete の JSON-RPC レスポンスを構築して返す
+static string BuildKcellDeleteResponse(JsonNode? idNode, string? cellName, string? key, string dbPath)
+{
+    var jsonOptions = new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+    string text;
+    if (string.IsNullOrWhiteSpace(cellName))
+    {
+        text = "cell_name は必須です。";
+    }
+    else
+    {
+        try
+        {
+            string? normKey = string.IsNullOrWhiteSpace(key) ? null : key;
+            using var kc = new KnowledgeCell(dbPath);
+            int deleted = kc.Delete(cellName, normKey);
+            if (deleted == 0)
+                text = normKey != null
+                    ? $"[{cellName}] キー「{normKey}」は存在しません。"
+                    : $"[{cellName}] は存在しません。";
+            else
+                text = normKey != null
+                    ? $"削除しました: [{cellName}] {normKey}"
+                    : $"削除しました: [{cellName}]（{deleted}件）";
+        }
+        catch (Exception ex) { text = $"エラー: {ex.Message}"; }
+    }
+    var response = new JsonObject
+    {
+        ["jsonrpc"] = "2.0",
+        ["id"]      = idNode?.DeepClone(),
+        ["result"]  = new JsonObject
+        {
+            ["content"] = new JsonArray { new JsonObject { ["type"] = "text", ["text"] = text } }
+        }
+    };
+    return response.ToJsonString(jsonOptions);
+}
+
+// kcell_list の JSON-RPC レスポンスを構築して返す
+static string BuildKcellListResponse(JsonNode? idNode, string dbPath)
+{
+    var jsonOptions = new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+    string text;
+    try
+    {
+        using var kc = new KnowledgeCell(dbPath);
+        var cells = kc.List().ToList();
+        if (cells.Count == 0)
+        {
+            text = "KnowledgeCellにデータはありません。";
+        }
+        else
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine($"KnowledgeCells {cells.Count}セル:");
+            foreach (var (cn, cnt, lu) in cells)
+            {
+                var dt = DateTimeOffset.FromUnixTimeSeconds(lu).ToLocalTime();
+                sb.AppendLine($"  {cn}  ({cnt}件, 最終更新: {dt:yyyy-MM-dd HH:mm:ss})");
+            }
+            text = sb.ToString().TrimEnd();
+        }
+    }
+    catch (Exception ex) { text = $"エラー: {ex.Message}"; }
+    var response = new JsonObject
+    {
+        ["jsonrpc"] = "2.0",
+        ["id"]      = idNode?.DeepClone(),
+        ["result"]  = new JsonObject
+        {
+            ["content"] = new JsonArray { new JsonObject { ["type"] = "text", ["text"] = text } }
+        }
+    };
+    return response.ToJsonString(jsonOptions);
+}
+
 // Vault ルートに生成する README.md の内容を返す
 static string BuildWelcomeReadme() => """
     # ようこそ MCPVault へ
@@ -2072,7 +2362,7 @@ static string BuildDefaultConfig() => """
         "additional_folders": []
       },
       "indexing": {
-        "include_folder_names": false
+        "include_folder_names": true
       }
     }
     """;
