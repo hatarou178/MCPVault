@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.IO.Ports;
+using System.Reflection;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
@@ -8,6 +9,11 @@ using System.Text.RegularExpressions;
 
 // MCPVault - スタンドアロン MCP サーバー
 // Claude ↔ stdin/stdout ↔ [MCPVault] ↔ Obsidian Vault（ファイルシステム直接アクセス）
+
+var _asm = Assembly.GetExecutingAssembly();
+string AppVersion = _asm.GetName().Version?.ToString(3) ?? "0.0.0";
+string BuildDate  = _asm.GetCustomAttributes<AssemblyMetadataAttribute>()
+    .FirstOrDefault(a => a.Key == "BuildDate")?.Value ?? "unknown";
 
 // UTF-8 強制（Windows デフォルトは UTF-8 でないため MCP の JSON が壊れる）
 Console.InputEncoding  = Encoding.UTF8;
@@ -37,9 +43,15 @@ for (int i = 0; i < args.Length; i++)
 string? VAULT_PATH  = vaultArg ?? Environment.GetEnvironmentVariable("OBSIDIAN_VAULT_PATH") ?? @"C:\Vault";
 string mcpVaultDir  = Path.Combine(VAULT_PATH, ".MCPVault");
 string DB_PATH      = Path.Combine(mcpVaultDir, "notes.db");
+string KC_DB_PATH   = Path.Combine(mcpVaultDir, "KnowledgeCell.db");
 // セミコロン区切りで除外フォルダを追加可能 例: "Tools3;Private"
 string[] EXTRA_EXCLUDED = (Environment.GetEnvironmentVariable("MCP_EXCLUDED_FOLDERS") ?? "")
     .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+// ゲストVault状態（立ち上げ後に guest_open で追加できる一時Vault）
+string? guestVaultPath = null;
+string GUEST_DB_PATH = Path.Combine(mcpVaultDir, "guestnotes.db");
+CancellationTokenSource? guestWatcherCts = null;
 
 // .MCPVault フォルダが存在しない場合は初回セットアップ（デフォルト設定ファイルを生成）
 string configFilePath = Path.Combine(mcpVaultDir, "mcp_config.json");
@@ -139,10 +151,21 @@ try
     Directory.CreateDirectory(Path.GetDirectoryName(errorLogPath)!);
     errorLogWriter = new StreamWriter(errorLogPath, append: true, Encoding.UTF8) { AutoFlush = true };
     var toolNames = GetToolNames();
-    errorLogWriter.WriteLine($"=== MCPVault 1.0.0  {DateTime.Now:yyyy-MM-dd HH:mm:ss} ===");
+    errorLogWriter.WriteLine($"=== MCPVault {AppVersion} (build {BuildDate})  {DateTime.Now:yyyy-MM-dd HH:mm:ss} ===");
     errorLogWriter.WriteLine($"    Tools({toolNames.Length}): {string.Join(", ", toolNames)}");
 }
 catch (Exception ex) { Console.Error.WriteLine($"Error log open failed: {ex.Message}"); }
+
+// KnowledgeCell DB を初期化
+try { using var kc = new KnowledgeCell(KC_DB_PATH); }
+catch (Exception ex) { Console.Error.WriteLine($"KnowledgeCell init error: {ex.Message}"); }
+
+// 起動時にゲストDBの残骸を削除（前回 guest_close 失敗 / クラッシュ時の残留対策）
+if (File.Exists(GUEST_DB_PATH))
+{
+    try { File.Delete(GUEST_DB_PATH); }
+    catch (Exception ex) { Console.Error.WriteLine($"Guest DB cleanup error: {ex.Message}"); }
+}
 
 // ウォッチャーを先に起動し、並行してフルスキャンを行う
 if (VAULT_PATH != null && Directory.Exists(VAULT_PATH))
@@ -170,7 +193,7 @@ while ((input = await Console.In.ReadLineAsync()) != null)
 
         if (method == "initialize")
         {
-            response = BuildInitializeResponse(id);
+            response = BuildInitializeResponse(id, AppVersion);
             Log(serial, logWriter, "[MCPVault] initialize");
         }
         else if (method?.StartsWith("notifications/") == true)
@@ -190,6 +213,75 @@ while ((input = await Console.In.ReadLineAsync()) != null)
             Log(serial, logWriter, $"[MCPVault] tools/call {toolName}");
             currentToolName = toolName;
 
+            if (toolName == "guest_open")
+            {
+                string? guestVp = pargs?["vault_path"]?.GetValue<string>();
+                string guestMsg;
+                if (string.IsNullOrWhiteSpace(guestVp))
+                {
+                    guestMsg = "vault_path が指定されていません。";
+                }
+                else if (!Directory.Exists(guestVp))
+                {
+                    guestMsg = $"フォルダが見つかりません: {guestVp}";
+                }
+                else
+                {
+                    // 既存ゲストVaultを閉じてから開く
+                    guestWatcherCts?.Cancel();
+                    guestWatcherCts?.Dispose();
+                    guestWatcherCts = null;
+                    if (File.Exists(GUEST_DB_PATH)) try { File.Delete(GUEST_DB_PATH); } catch { }
+
+                    guestVaultPath  = guestVp;
+                    guestWatcherCts = new CancellationTokenSource();
+                    var _guestCt    = guestWatcherCts.Token;
+                    string _guestVp = guestVp;
+                    _ = Task.Run(() => WatchVaultChanges(_guestVp, GUEST_DB_PATH, excludeDotFolders, excludeUnderscoreFolders, excludeIdeFolders, serial, logWriter, _guestCt));
+                    _ = Task.Run(() => BuildVaultIndex(_guestVp, GUEST_DB_PATH, EXTRA_EXCLUDED, excludeDotFolders, excludeUnderscoreFolders, excludeIdeFolders, includeFolderNames, serial, logWriter));
+                    guestMsg = $"ゲストVaultを開きました: {guestVp}（インデックス構築中）";
+                }
+                var _jOpt = new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+                response = new JsonObject
+                {
+                    ["jsonrpc"] = "2.0",
+                    ["id"]      = id?.DeepClone(),
+                    ["result"]  = new JsonObject
+                    {
+                        ["content"] = new JsonArray { new JsonObject { ["type"] = "text", ["text"] = guestMsg } }
+                    }
+                }.ToJsonString(_jOpt);
+            }
+            else if (toolName == "guest_close")
+            {
+                string guestMsg;
+                if (guestVaultPath == null)
+                {
+                    guestMsg = "ゲストVaultが開かれていません。";
+                }
+                else
+                {
+                    string closedPath = guestVaultPath;
+                    guestWatcherCts?.Cancel();
+                    guestWatcherCts?.Dispose();
+                    guestWatcherCts = null;
+                    guestVaultPath  = null;
+                    if (File.Exists(GUEST_DB_PATH)) try { File.Delete(GUEST_DB_PATH); } catch { }
+                    guestMsg = $"ゲストVaultを閉じました: {closedPath}";
+                }
+                var _jOpt = new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+                response = new JsonObject
+                {
+                    ["jsonrpc"] = "2.0",
+                    ["id"]      = id?.DeepClone(),
+                    ["result"]  = new JsonObject
+                    {
+                        ["content"] = new JsonArray { new JsonObject { ["type"] = "text", ["text"] = guestMsg } }
+                    }
+                }.ToJsonString(_jOpt);
+            }
+            else
+            {
             response = toolName switch
             {
                 "list_notes" => File.Exists(DB_PATH)
@@ -272,8 +364,104 @@ while ((input = await Console.In.ReadLineAsync()) != null)
                     ? BuildDeleteEmptyFolderResponse(id, pargs?["path"]?.GetValue<string>(), VAULT_PATH)
                     : BuildErrorResponse(id, "OBSIDIAN_VAULT_PATH が設定されていません。"),
 
+                "kcell_write" => BuildKcellWriteResponse(id,
+                    pargs?["cell_name"]?.GetValue<string>(),
+                    pargs?["key"]?.GetValue<string>(),
+                    pargs?["value"]?.GetValue<string>(),
+                    KC_DB_PATH),
+
+                "kcell_read" => BuildKcellReadResponse(id,
+                    pargs?["cell_name"]?.GetValue<string>(),
+                    pargs?["key"]?.GetValue<string>(),
+                    pargs?["latest"]?.GetValue<bool>() ?? false,
+                    KC_DB_PATH),
+
+                "kcell_delete" => BuildKcellDeleteResponse(id,
+                    pargs?["cell_name"]?.GetValue<string>(),
+                    pargs?["key"]?.GetValue<string>(),
+                    KC_DB_PATH),
+
+                "kcell_list" => BuildKcellListResponse(id, KC_DB_PATH),
+
+                // ゲストVaultツール群（guest_open / guest_close は上の if-else で処理）
+                "guest_list_notes" => guestVaultPath != null && File.Exists(GUEST_DB_PATH)
+                    ? BuildListNotesResponse(id, pargs?["folder"]?.GetValue<string>(), GUEST_DB_PATH)
+                    : BuildErrorResponse(id, guestVaultPath == null ? "ゲストVaultが開かれていません。guest_open で開いてください。" : "インデックスが準備中です。しばらく待ってから再試行してください。"),
+
+                "guest_recent_notes" => guestVaultPath != null && File.Exists(GUEST_DB_PATH)
+                    ? BuildRecentNotesResponse(id, pargs?["count"]?.GetValue<int>() ?? 10, GUEST_DB_PATH)
+                    : BuildErrorResponse(id, guestVaultPath == null ? "ゲストVaultが開かれていません。guest_open で開いてください。" : "インデックスが準備中です。しばらく待ってから再試行してください。"),
+
+                "guest_search_notes" => guestVaultPath != null && File.Exists(GUEST_DB_PATH)
+                    ? BuildSearchNotesResponse(id, pargs?["query"]?.GetValue<string>(), GUEST_DB_PATH, pargs?["limit"]?.GetValue<int>() ?? 20)
+                    : BuildErrorResponse(id, guestVaultPath == null ? "ゲストVaultが開かれていません。guest_open で開いてください。" : "インデックスが準備中です。しばらく待ってから再試行してください。"),
+
+                "guest_read_note" => guestVaultPath != null
+                    ? BuildReadNoteResponse(id, pargs?["path"]?.GetValue<string>(), guestVaultPath, GUEST_DB_PATH)
+                    : BuildErrorResponse(id, "ゲストVaultが開かれていません。guest_open で開いてください。"),
+
+                "guest_read_notes" => guestVaultPath != null
+                    ? BuildReadMultipleNotesResponse(id,
+                        pargs?["paths"]?.AsArray()
+                            ?.Select(p => p?.GetValue<string>()).OfType<string>().ToArray() ?? [],
+                        guestVaultPath, GUEST_DB_PATH)
+                    : BuildErrorResponse(id, "ゲストVaultが開かれていません。guest_open で開いてください。"),
+
+                "guest_create_note" => guestVaultPath != null
+                    ? BuildCreateNoteResponse(id,
+                        pargs?["path"]?.GetValue<string>(),
+                        pargs?["content"]?.GetValue<string>(),
+                        pargs?["template"]?.GetValue<string>(),
+                        guestVaultPath, GUEST_DB_PATH)
+                    : BuildErrorResponse(id, "ゲストVaultが開かれていません。guest_open で開いてください。"),
+
+                "guest_update_note" => guestVaultPath != null
+                    ? BuildUpdateNoteResponse(id,
+                        pargs?["path"]?.GetValue<string>(),
+                        pargs?["content"]?.GetValue<string>(),
+                        pargs?["append"]?.GetValue<bool>()               ?? false,
+                        pargs?["create_if_not_exists"]?.GetValue<bool>() ?? true,
+                        pargs?["mode"]?.GetValue<string>(),
+                        pargs?["old_text"]?.GetValue<string>(),
+                        pargs?["replace_all"]?.GetValue<bool>()          ?? false,
+                        pargs?["anchor"]?.GetValue<string>(),
+                        pargs?["insert_after"]?.GetValue<bool>()         ?? true,
+                        guestVaultPath, GUEST_DB_PATH)
+                    : BuildErrorResponse(id, "ゲストVaultが開かれていません。guest_open で開いてください。"),
+
+                "guest_delete_note" => guestVaultPath != null
+                    ? BuildDeleteNoteResponse(id, pargs?["path"]?.GetValue<string>(), guestVaultPath, GUEST_DB_PATH)
+                    : BuildErrorResponse(id, "ゲストVaultが開かれていません。guest_open で開いてください。"),
+
+                "guest_move_note" => guestVaultPath != null
+                    ? BuildMoveNoteResponse(id,
+                        pargs?["sourcePath"]?.GetValue<string>(),
+                        pargs?["destinationPath"]?.GetValue<string>(),
+                        guestVaultPath, GUEST_DB_PATH)
+                    : BuildErrorResponse(id, "ゲストVaultが開かれていません。guest_open で開いてください。"),
+
+                "guest_list_folders" => guestVaultPath != null && File.Exists(GUEST_DB_PATH)
+                    ? BuildListFoldersResponse(id, GUEST_DB_PATH)
+                    : BuildErrorResponse(id, guestVaultPath == null ? "ゲストVaultが開かれていません。guest_open で開いてください。" : "インデックスが準備中です。しばらく待ってから再試行してください。"),
+
+                "guest_create_folder" => guestVaultPath != null
+                    ? BuildCreateFolderResponse(id, pargs?["path"]?.GetValue<string>(), guestVaultPath, GUEST_DB_PATH)
+                    : BuildErrorResponse(id, "ゲストVaultが開かれていません。guest_open で開いてください。"),
+
+                "guest_rename_folder" => guestVaultPath != null
+                    ? BuildRenameFolderResponse(id,
+                        pargs?["sourcePath"]?.GetValue<string>(),
+                        pargs?["destinationPath"]?.GetValue<string>(),
+                        guestVaultPath, GUEST_DB_PATH)
+                    : BuildErrorResponse(id, "ゲストVaultが開かれていません。guest_open で開いてください。"),
+
+                "guest_delete_empty_folder" => guestVaultPath != null
+                    ? BuildDeleteEmptyFolderResponse(id, pargs?["path"]?.GetValue<string>(), guestVaultPath)
+                    : BuildErrorResponse(id, "ゲストVaultが開かれていません。guest_open で開いてください。"),
+
                 _ => BuildErrorResponse(id, $"不明なツール: {toolName}")
             };
+            } // end else (not guest_open/guest_close)
         }
         else if (method == "resources/list" && File.Exists(DB_PATH))
         {
@@ -375,7 +563,7 @@ static string[] GetToolNames()
 }
 
 // Vault の .md ファイルを監視してインデックスを差分更新する
-static void WatchVaultChanges(string vaultPath, string dbPath, bool exDot, bool exUnderscore, bool exIde, SerialPort? serial, StreamWriter? mainLog)
+static void WatchVaultChanges(string vaultPath, string dbPath, bool exDot, bool exUnderscore, bool exIde, SerialPort? serial, StreamWriter? mainLog, CancellationToken ct = default)
 {
     try
     {
@@ -473,8 +661,10 @@ static void WatchVaultChanges(string vaultPath, string dbPath, bool exDot, bool 
         watcher.EnableRaisingEvents = true;
         Log(serial, mainLog, $"[IDX] Watching: {vaultPath}");
 
-        // プロセス終了まで監視継続
-        Thread.Sleep(Timeout.Infinite);
+        // キャンセルまで監視継続（guest_close / プロセス終了で抜ける）
+        ct.WaitHandle.WaitOne();
+        watcher.Dispose();
+        Log(serial, mainLog, $"[IDX] Watch stopped: {vaultPath}");
     }
     catch (Exception ex) { Log(serial, mainLog, $"[IDX] Watcher start error: {ex.Message}"); }
 }
@@ -642,7 +832,7 @@ static void BuildVaultIndex(string vaultPath, string dbPath, string[] extraExclu
 }
 
 // initialize レスポンスを構築して返す
-static string BuildInitializeResponse(JsonNode? idNode)
+static string BuildInitializeResponse(JsonNode? idNode, string version = "0.0.0")
 {
     var jsonOptions = new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     var response = new JsonObject
@@ -660,7 +850,7 @@ static string BuildInitializeResponse(JsonNode? idNode)
             ["serverInfo"] = new JsonObject
             {
                 ["name"]    = "mcpvault",
-                ["version"] = "1.0.0",
+                ["version"] = version,
             }
         }
     };
@@ -939,6 +1129,346 @@ static string BuildToolsListResponse(JsonNode? idNode)
                         "type": "string",
                         "description": "Relative path of the folder to delete"
                     }
+                },
+                "required": ["path"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "kcell_write",
+            "description": "Writes a key-value pair to a named KnowledgeCell. Creates the cell automatically if it does not exist. Useful for persisting notes, session state, or cross-session instructions.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cell_name": {
+                        "type": "string",
+                        "description": "Cell name (e.g. 'quick', 'session', 'novel'). Created automatically if absent."
+                    },
+                    "key": {
+                        "type": "string",
+                        "description": "Key"
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": "Value to store"
+                    }
+                },
+                "required": ["cell_name", "key", "value"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "kcell_read",
+            "description": "Reads one or all entries from a named KnowledgeCell. Omit key to retrieve all entries sorted by most recently updated. Set latest:true to return only the single most recently written entry.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cell_name": {
+                        "type": "string",
+                        "description": "Cell name"
+                    },
+                    "key": {
+                        "type": "string",
+                        "description": "Key to read. Omit to read all keys in the cell."
+                    },
+                    "latest": {
+                        "type": "boolean",
+                        "description": "If true, returns only the most recently updated entry regardless of key."
+                    }
+                },
+                "required": ["cell_name"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "kcell_delete",
+            "description": "Deletes a key from a KnowledgeCell, or deletes the entire cell and all its keys if key is omitted.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cell_name": {
+                        "type": "string",
+                        "description": "Cell name"
+                    },
+                    "key": {
+                        "type": "string",
+                        "description": "Key to delete. Omit to delete the entire cell."
+                    }
+                },
+                "required": ["cell_name"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "kcell_list",
+            "description": "Lists all KnowledgeCells with their key count and last updated timestamp.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+        """));
+
+    // ゲストVaultツール群
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "guest_open",
+            "description": "Opens a second (guest) Vault for temporary use. Builds a full-text index (guestnotes.db) in the background. All guest_* tools operate on this vault. Only one guest vault can be open at a time; calling again replaces the current one.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "vault_path": {
+                        "type": "string",
+                        "description": "Absolute path to the guest vault root folder"
+                    }
+                },
+                "required": ["vault_path"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "guest_close",
+            "description": "Closes the currently open guest vault, stops its file watcher, and deletes the temporary index (guestnotes.db).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "guest_list_notes",
+            "description": "Lists notes in the guest vault with path and last-modified timestamp. Optionally filter by folder.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "folder": {
+                        "type": "string",
+                        "description": "Filter by folder (relative path). Omit to list all notes."
+                    }
+                }
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "guest_recent_notes",
+            "description": "Returns the most recently modified notes in the guest vault.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "count": {
+                        "type": "number",
+                        "description": "Number of notes to return (1–100)",
+                        "default": 10
+                    }
+                }
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "guest_search_notes",
+            "description": "Full-text search of the guest vault (FTS5 trigram). Supports Japanese and English. Query must be 3 or more characters.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query (3 or more characters)"
+                    },
+                    "limit": {
+                        "type": "number",
+                        "description": "Maximum number of results",
+                        "default": 20
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "guest_read_note",
+            "description": "Reads a note from the guest vault by relative path and updates the guest index.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Relative path to the note (e.g. 'Daily/2024-01-15.md')"
+                    }
+                },
+                "required": ["path"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "guest_read_notes",
+            "description": "Reads multiple notes from the guest vault in a single call. Returns each note's content preceded by a path header (=== path ===).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "List of relative paths"
+                    }
+                },
+                "required": ["paths"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "guest_create_note",
+            "description": "Creates a new note in the guest vault (.md only). Fails if the note already exists.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Relative path for the new note (must end with .md)"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Initial content. Takes precedence over template."
+                    },
+                    "template": {
+                        "type": "string",
+                        "description": "Template name (e.g. 'daily' → templates/daily.md). Ignored if content is specified."
+                    }
+                },
+                "required": ["path"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "guest_update_note",
+            "description": "Writes content to a note in the guest vault (.md only) and updates the guest index. Modes: overwrite (default), append, replace (old_text→content), insert (around anchor line).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Relative path to the note (must end with .md)"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Content to write / replacement text / text to insert"
+                    },
+                    "append": { "type": "boolean", "default": false },
+                    "create_if_not_exists": { "type": "boolean", "default": true },
+                    "mode": { "type": "string", "enum": ["replace", "insert"] },
+                    "old_text": { "type": "string" },
+                    "replace_all": { "type": "boolean", "default": false },
+                    "anchor": { "type": "string" },
+                    "insert_after": { "type": "boolean", "default": true }
+                },
+                "required": ["path", "content"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "guest_delete_note",
+            "description": "Deletes a note from the guest vault and removes it from the guest index.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Relative path to the note to delete"
+                    }
+                },
+                "required": ["path"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "guest_move_note",
+            "description": "Moves or renames a note in the guest vault and updates wiki links in other guest notes that reference it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sourcePath": { "type": "string", "description": "Current relative path" },
+                    "destinationPath": { "type": "string", "description": "New relative path (must end with .md)" }
+                },
+                "required": ["sourcePath", "destinationPath"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "guest_list_folders",
+            "description": "Lists all folders in the guest vault that contain at least one note.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "guest_create_folder",
+            "description": "Creates a new folder in the guest vault. Fails if the folder already exists.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative path of the folder to create" }
+                },
+                "required": ["path"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "guest_rename_folder",
+            "description": "Renames or moves a folder in the guest vault and updates all affected note paths in the guest index.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sourcePath": { "type": "string" },
+                    "destinationPath": { "type": "string" }
+                },
+                "required": ["sourcePath", "destinationPath"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "guest_delete_empty_folder",
+            "description": "Deletes a folder in the guest vault only if it is completely empty.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative path of the folder to delete" }
                 },
                 "required": ["path"]
             }
@@ -2037,6 +2567,184 @@ static bool IsPatternExcluded(string folder, bool exDot, bool exUnderscore, bool
         name.Equals(".mvn",         StringComparison.OrdinalIgnoreCase);
 }
 
+// kcell_write の JSON-RPC レスポンスを構築して返す
+static string BuildKcellWriteResponse(JsonNode? idNode, string? cellName, string? key, string? value, string dbPath)
+{
+    var jsonOptions = new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+    string text;
+    if (string.IsNullOrWhiteSpace(cellName) || string.IsNullOrWhiteSpace(key) || value is null)
+    {
+        text = "cell_name, key, value はすべて必須です。";
+    }
+    else
+    {
+        try
+        {
+            using var kc = new KnowledgeCell(dbPath);
+            kc.Write(cellName, key, value);
+            text = $"書き込みました: [{cellName}] {key}";
+        }
+        catch (Exception ex) { text = $"エラー: {ex.Message}"; }
+    }
+    var response = new JsonObject
+    {
+        ["jsonrpc"] = "2.0",
+        ["id"]      = idNode?.DeepClone(),
+        ["result"]  = new JsonObject
+        {
+            ["content"] = new JsonArray { new JsonObject { ["type"] = "text", ["text"] = text } }
+        }
+    };
+    return response.ToJsonString(jsonOptions);
+}
+
+// kcell_read の JSON-RPC レスポンスを構築して返す
+static string BuildKcellReadResponse(JsonNode? idNode, string? cellName, string? key, bool latest, string dbPath)
+{
+    var jsonOptions = new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+    string text;
+    if (string.IsNullOrWhiteSpace(cellName))
+    {
+        text = "cell_name は必須です。";
+    }
+    else
+    {
+        try
+        {
+            string? normKey = string.IsNullOrWhiteSpace(key) ? null : key;
+            using var kc = new KnowledgeCell(dbPath);
+
+            if (latest)
+            {
+                // 最終更新エントリを1件だけ返す（key指定は無視）
+                var entries = kc.Read(cellName, key: null).ToList();
+                if (entries.Count == 0)
+                    text = $"[{cellName}] にエントリはありません。";
+                else
+                {
+                    var (k, v, ua) = entries[0];
+                    var dt = DateTimeOffset.FromUnixTimeSeconds(ua).ToLocalTime();
+                    text = $"[{cellName}] 最新: {k} = {v}  ({dt:yyyy-MM-dd HH:mm:ss})";
+                }
+            }
+            else
+            {
+                var entries = kc.Read(cellName, normKey).ToList();
+                if (entries.Count == 0)
+                {
+                    text = normKey != null
+                        ? $"[{cellName}] キー「{normKey}」は存在しません。"
+                        : $"[{cellName}] にエントリはありません。";
+                }
+                else if (normKey != null)
+                {
+                    // 特定キー指定の場合は値のみ返す
+                    text = entries[0].Value;
+                }
+                else
+                {
+                    var sb = new StringBuilder();
+                    sb.AppendLine($"[{cellName}] {entries.Count}件:");
+                    foreach (var (k, v, ua) in entries)
+                    {
+                        var dt = DateTimeOffset.FromUnixTimeSeconds(ua).ToLocalTime();
+                        sb.AppendLine($"  {k} = {v}  ({dt:yyyy-MM-dd HH:mm:ss})");
+                    }
+                    text = sb.ToString().TrimEnd();
+                }
+            }
+        }
+        catch (Exception ex) { text = $"エラー: {ex.Message}"; }
+    }
+    var response = new JsonObject
+    {
+        ["jsonrpc"] = "2.0",
+        ["id"]      = idNode?.DeepClone(),
+        ["result"]  = new JsonObject
+        {
+            ["content"] = new JsonArray { new JsonObject { ["type"] = "text", ["text"] = text } }
+        }
+    };
+    return response.ToJsonString(jsonOptions);
+}
+
+// kcell_delete の JSON-RPC レスポンスを構築して返す
+static string BuildKcellDeleteResponse(JsonNode? idNode, string? cellName, string? key, string dbPath)
+{
+    var jsonOptions = new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+    string text;
+    if (string.IsNullOrWhiteSpace(cellName))
+    {
+        text = "cell_name は必須です。";
+    }
+    else
+    {
+        try
+        {
+            string? normKey = string.IsNullOrWhiteSpace(key) ? null : key;
+            using var kc = new KnowledgeCell(dbPath);
+            int deleted = kc.Delete(cellName, normKey);
+            if (deleted == 0)
+                text = normKey != null
+                    ? $"[{cellName}] キー「{normKey}」は存在しません。"
+                    : $"[{cellName}] は存在しません。";
+            else
+                text = normKey != null
+                    ? $"削除しました: [{cellName}] {normKey}"
+                    : $"削除しました: [{cellName}]（{deleted}件）";
+        }
+        catch (Exception ex) { text = $"エラー: {ex.Message}"; }
+    }
+    var response = new JsonObject
+    {
+        ["jsonrpc"] = "2.0",
+        ["id"]      = idNode?.DeepClone(),
+        ["result"]  = new JsonObject
+        {
+            ["content"] = new JsonArray { new JsonObject { ["type"] = "text", ["text"] = text } }
+        }
+    };
+    return response.ToJsonString(jsonOptions);
+}
+
+// kcell_list の JSON-RPC レスポンスを構築して返す
+static string BuildKcellListResponse(JsonNode? idNode, string dbPath)
+{
+    var jsonOptions = new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+    string text;
+    try
+    {
+        using var kc = new KnowledgeCell(dbPath);
+        var cells = kc.List().ToList();
+        if (cells.Count == 0)
+        {
+            text = "KnowledgeCellにデータはありません。";
+        }
+        else
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine($"KnowledgeCells {cells.Count}セル:");
+            foreach (var (cn, cnt, lu) in cells)
+            {
+                var dt = DateTimeOffset.FromUnixTimeSeconds(lu).ToLocalTime();
+                sb.AppendLine($"  {cn}  ({cnt}件, 最終更新: {dt:yyyy-MM-dd HH:mm:ss})");
+            }
+            text = sb.ToString().TrimEnd();
+        }
+    }
+    catch (Exception ex) { text = $"エラー: {ex.Message}"; }
+    var response = new JsonObject
+    {
+        ["jsonrpc"] = "2.0",
+        ["id"]      = idNode?.DeepClone(),
+        ["result"]  = new JsonObject
+        {
+            ["content"] = new JsonArray { new JsonObject { ["type"] = "text", ["text"] = text } }
+        }
+    };
+    return response.ToJsonString(jsonOptions);
+}
+
 // Vault ルートに生成する README.md の内容を返す
 static string BuildWelcomeReadme() => """
     # ようこそ MCPVault へ
@@ -2072,7 +2780,7 @@ static string BuildDefaultConfig() => """
         "additional_folders": []
       },
       "indexing": {
-        "include_folder_names": false
+        "include_folder_names": true
       }
     }
     """;
