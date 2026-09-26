@@ -74,11 +74,22 @@ public sealed class NoteIndex : IDisposable
                 tokenize='trigram'
             );
 
+            -- rollback_note 用の書き込み履歴（notes の削除後も残すため外部キーなし）
+            CREATE TABLE IF NOT EXISTS note_history (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                relative_path TEXT    NOT NULL COLLATE NOCASE,
+                op            TEXT    NOT NULL,
+                prev_content  TEXT,
+                after_hash    TEXT,
+                created_at    INTEGER NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_notes_folder        ON notes         (folder);
             CREATE INDEX IF NOT EXISTS idx_notes_last_modified ON notes         (last_modified);
             CREATE INDEX IF NOT EXISTS idx_note_meta_note_id   ON note_meta     (note_id);
             CREATE INDEX IF NOT EXISTS idx_headings_note_id    ON note_headings (note_id);
             CREATE INDEX IF NOT EXISTS idx_aliases_note_id     ON note_aliases  (note_id);
+            CREATE INDEX IF NOT EXISTS idx_history_path        ON note_history  (relative_path, id);
             """;
         cmd.ExecuteNonQuery();
     }
@@ -355,6 +366,71 @@ public sealed class NoteIndex : IDisposable
         while (r.Read())
             result.Add((r.GetString(0), r.GetString(1)));
         return result;
+    }
+
+    // -------------------------------------------------------------------------
+    // note_history テーブル操作
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// 書き込み履歴を追加し、同じパスの履歴が keep 件を超えた分は古い順に削除する。
+    /// prevContent = null は書き込み前にファイルが存在しなかったこと、afterHash = null は書き込み後にファイルが存在しないことを表す。
+    /// </summary>
+    public void AddHistory(string relativePath, string op, string? prevContent, string? afterHash, int keep = 20)
+    {
+        using var cmd = _db.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO note_history (relative_path, op, prev_content, after_hash, created_at)
+            VALUES ($path, $op, $prev, $after, $now);
+            DELETE FROM note_history
+            WHERE relative_path = $path
+              AND id NOT IN (SELECT id FROM note_history WHERE relative_path = $path ORDER BY id DESC LIMIT $keep);
+            """;
+        cmd.Parameters.AddWithValue("$path",  relativePath);
+        cmd.Parameters.AddWithValue("$op",    op);
+        cmd.Parameters.AddWithValue("$prev",  prevContent ?? (object)DBNull.Value);
+        cmd.Parameters.AddWithValue("$after", afterHash   ?? (object)DBNull.Value);
+        cmd.Parameters.AddWithValue("$now",   DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        cmd.Parameters.AddWithValue("$keep",  keep);
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>指定パスの最新の履歴を返す。なければ null。</summary>
+    public HistoryEntry? GetLatestHistory(string relativePath)
+    {
+        using var cmd = _db.CreateCommand();
+        cmd.CommandText = """
+            SELECT id, op, prev_content, after_hash, created_at
+            FROM note_history WHERE relative_path = $path
+            ORDER BY id DESC LIMIT 1
+            """;
+        cmd.Parameters.AddWithValue("$path", relativePath);
+        using var r = cmd.ExecuteReader();
+        if (!r.Read()) return null;
+        return new HistoryEntry(
+            r.GetInt64(0),
+            r.GetString(1),
+            r.IsDBNull(2) ? null : r.GetString(2),
+            r.IsDBNull(3) ? null : r.GetString(3),
+            r.GetInt64(4));
+    }
+
+    /// <summary>指定パスの履歴件数を返す。</summary>
+    public int CountHistory(string relativePath)
+    {
+        using var cmd = _db.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM note_history WHERE relative_path = $path";
+        cmd.Parameters.AddWithValue("$path", relativePath);
+        return Convert.ToInt32(cmd.ExecuteScalar());
+    }
+
+    /// <summary>履歴を 1 件削除する。</summary>
+    public void DeleteHistory(long id)
+    {
+        using var cmd = _db.CreateCommand();
+        cmd.CommandText = "DELETE FROM note_history WHERE id = $id";
+        cmd.Parameters.AddWithValue("$id", id);
+        cmd.ExecuteNonQuery();
     }
 
     // -------------------------------------------------------------------------
@@ -649,4 +725,12 @@ public record NoteEntry(
 public record ExcludedFolder(
     string  Path,
     string? Note
+);
+
+public record HistoryEntry(
+    long    Id,
+    string  Op,
+    string? PrevContent,
+    string? AfterHash,
+    long    CreatedAt
 );

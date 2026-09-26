@@ -288,7 +288,7 @@ while ((input = await Console.In.ReadLineAsync()) != null)
                     ? BuildListNotesResponse(id, pargs?["folder"]?.GetValue<string>(), DB_PATH)
                     : BuildErrorResponse(id, "インデックスが準備できていません。しばらく待ってから再試行してください。"),
 
-                "search_notes" or "search_vault" => File.Exists(DB_PATH)
+                "search_notes" => File.Exists(DB_PATH)
                     ? BuildSearchNotesResponse(id,
                         pargs?["query"]?.GetValue<string>(),
                         DB_PATH,
@@ -316,13 +316,34 @@ while ((input = await Console.In.ReadLineAsync()) != null)
                     ? BuildUpdateNoteResponse(id,
                         pargs?["path"]?.GetValue<string>(),
                         pargs?["content"]?.GetValue<string>(),
-                        pargs?["append"]?.GetValue<bool>()               ?? false,
-                        pargs?["create_if_not_exists"]?.GetValue<bool>() ?? true,
-                        pargs?["mode"]?.GetValue<string>(),
+                        pargs?["read_back"]?.GetValue<bool>() ?? false,
+                        VAULT_PATH, DB_PATH)
+                    : BuildErrorResponse(id, "OBSIDIAN_VAULT_PATH が設定されていません。"),
+
+                "append_note" => VAULT_PATH != null
+                    ? BuildAppendNoteResponse(id,
+                        pargs?["path"]?.GetValue<string>(),
+                        pargs?["content"]?.GetValue<string>(),
+                        pargs?["journal"]?.GetValue<bool>() ?? false,
+                        pargs?["read_back"]?.GetValue<bool>() ?? false,
+                        VAULT_PATH, DB_PATH)
+                    : BuildErrorResponse(id, "OBSIDIAN_VAULT_PATH が設定されていません。"),
+
+                "edit_note" => VAULT_PATH != null
+                    ? BuildEditNoteResponse(id,
+                        pargs?["path"]?.GetValue<string>(),
                         pargs?["old_text"]?.GetValue<string>(),
-                        pargs?["replace_all"]?.GetValue<bool>()          ?? false,
-                        pargs?["anchor"]?.GetValue<string>(),
-                        pargs?["insert_after"]?.GetValue<bool>()         ?? true,
+                        pargs?["new_text"]?.GetValue<string>(),
+                        pargs?["replace_all"]?.GetValue<bool>() ?? false,
+                        pargs?["read_back"]?.GetValue<bool>() ?? false,
+                        VAULT_PATH, DB_PATH)
+                    : BuildErrorResponse(id, "OBSIDIAN_VAULT_PATH が設定されていません。"),
+
+                "rollback_note" => VAULT_PATH != null
+                    ? BuildRollbackNoteResponse(id,
+                        pargs?["path"]?.GetValue<string>(),
+                        pargs?["force"]?.GetValue<bool>()     ?? false,
+                        pargs?["read_back"]?.GetValue<bool>() ?? false,
                         VAULT_PATH, DB_PATH)
                     : BuildErrorResponse(id, "OBSIDIAN_VAULT_PATH が設定されていません。"),
 
@@ -331,6 +352,7 @@ while ((input = await Console.In.ReadLineAsync()) != null)
                         pargs?["path"]?.GetValue<string>(),
                         pargs?["content"]?.GetValue<string>(),
                         pargs?["template"]?.GetValue<string>(),
+                        pargs?["read_back"]?.GetValue<bool>() ?? false,
                         VAULT_PATH, DB_PATH)
                     : BuildErrorResponse(id, "OBSIDIAN_VAULT_PATH が設定されていません。"),
 
@@ -368,6 +390,29 @@ while ((input = await Console.In.ReadLineAsync()) != null)
                     pargs?["cell_name"]?.GetValue<string>(),
                     pargs?["key"]?.GetValue<string>(),
                     pargs?["value"]?.GetValue<string>(),
+                    pargs?["read_back"]?.GetValue<bool>() ?? false,
+                    KC_DB_PATH),
+
+                "kcell_append" => BuildKcellAppendResponse(id,
+                    pargs?["cell_name"]?.GetValue<string>(),
+                    pargs?["key"]?.GetValue<string>(),
+                    pargs?["value"]?.GetValue<string>(),
+                    pargs?["journal"]?.GetValue<bool>()   ?? false,
+                    pargs?["read_back"]?.GetValue<bool>() ?? false,
+                    KC_DB_PATH),
+
+                "kcell_edit" => BuildKcellEditResponse(id,
+                    pargs?["cell_name"]?.GetValue<string>(),
+                    pargs?["key"]?.GetValue<string>(),
+                    pargs?["old_text"]?.GetValue<string>(),
+                    pargs?["new_text"]?.GetValue<string>(),
+                    pargs?["replace_all"]?.GetValue<bool>() ?? false,
+                    pargs?["read_back"]?.GetValue<bool>()   ?? false,
+                    KC_DB_PATH),
+
+                "kcell_rollback" => BuildKcellRollbackResponse(id,
+                    pargs?["cell_name"]?.GetValue<string>(),
+                    pargs?["read_back"]?.GetValue<bool>() ?? false,
                     KC_DB_PATH),
 
                 "kcell_read" => BuildKcellReadResponse(id,
@@ -382,6 +427,9 @@ while ((input = await Console.In.ReadLineAsync()) != null)
                     KC_DB_PATH),
 
                 "kcell_list" => BuildKcellListResponse(id, KC_DB_PATH),
+
+                "server_info" => BuildServerInfoResponse(id, AppVersion, BuildDate,
+                    VAULT_PATH, DB_PATH, guestVaultPath, GUEST_DB_PATH, logPath),
 
                 // ゲストVaultツール群（guest_open / guest_close は上の if-else で処理）
                 "guest_list_notes" => guestVaultPath != null && File.Exists(GUEST_DB_PATH)
@@ -412,6 +460,7 @@ while ((input = await Console.In.ReadLineAsync()) != null)
                         pargs?["path"]?.GetValue<string>(),
                         pargs?["content"]?.GetValue<string>(),
                         pargs?["template"]?.GetValue<string>(),
+                        pargs?["read_back"]?.GetValue<bool>() ?? false,
                         guestVaultPath, GUEST_DB_PATH)
                     : BuildErrorResponse(id, "ゲストVaultが開かれていません。guest_open で開いてください。"),
 
@@ -419,13 +468,34 @@ while ((input = await Console.In.ReadLineAsync()) != null)
                     ? BuildUpdateNoteResponse(id,
                         pargs?["path"]?.GetValue<string>(),
                         pargs?["content"]?.GetValue<string>(),
-                        pargs?["append"]?.GetValue<bool>()               ?? false,
-                        pargs?["create_if_not_exists"]?.GetValue<bool>() ?? true,
-                        pargs?["mode"]?.GetValue<string>(),
+                        pargs?["read_back"]?.GetValue<bool>() ?? false,
+                        guestVaultPath, GUEST_DB_PATH)
+                    : BuildErrorResponse(id, "ゲストVaultが開かれていません。guest_open で開いてください。"),
+
+                "guest_append_note" => guestVaultPath != null
+                    ? BuildAppendNoteResponse(id,
+                        pargs?["path"]?.GetValue<string>(),
+                        pargs?["content"]?.GetValue<string>(),
+                        pargs?["journal"]?.GetValue<bool>() ?? false,
+                        pargs?["read_back"]?.GetValue<bool>() ?? false,
+                        guestVaultPath, GUEST_DB_PATH)
+                    : BuildErrorResponse(id, "ゲストVaultが開かれていません。guest_open で開いてください。"),
+
+                "guest_edit_note" => guestVaultPath != null
+                    ? BuildEditNoteResponse(id,
+                        pargs?["path"]?.GetValue<string>(),
                         pargs?["old_text"]?.GetValue<string>(),
-                        pargs?["replace_all"]?.GetValue<bool>()          ?? false,
-                        pargs?["anchor"]?.GetValue<string>(),
-                        pargs?["insert_after"]?.GetValue<bool>()         ?? true,
+                        pargs?["new_text"]?.GetValue<string>(),
+                        pargs?["replace_all"]?.GetValue<bool>() ?? false,
+                        pargs?["read_back"]?.GetValue<bool>() ?? false,
+                        guestVaultPath, GUEST_DB_PATH)
+                    : BuildErrorResponse(id, "ゲストVaultが開かれていません。guest_open で開いてください。"),
+
+                "guest_rollback_note" => guestVaultPath != null
+                    ? BuildRollbackNoteResponse(id,
+                        pargs?["path"]?.GetValue<string>(),
+                        pargs?["force"]?.GetValue<bool>()     ?? false,
+                        pargs?["read_back"]?.GetValue<bool>() ?? false,
                         guestVaultPath, GUEST_DB_PATH)
                     : BuildErrorResponse(id, "ゲストVaultが開かれていません。guest_open で開いてください。"),
 
@@ -955,7 +1025,7 @@ static string BuildToolsListResponse(JsonNode? idNode)
     tools.Add(JsonNode.Parse("""
         {
             "name": "update_note",
-            "description": "Writes content to an Obsidian note (.md only) and updates the local index. Modes: overwrite (default), append, replace (old_text→content), insert (around anchor line).",
+            "description": "Overwrites an Obsidian note (.md only) with the given content, creating it if absent, and updates the local index. Use append_note to add to the end, or edit_note to change part of a note.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -965,43 +1035,108 @@ static string BuildToolsListResponse(JsonNode? idNode)
                     },
                     "content": {
                         "type": "string",
-                        "description": "Content to write / replacement text / text to insert"
+                        "description": "Full new content of the note"
                     },
-                    "append": {
+                    "read_back": {
                         "type": "boolean",
-                        "description": "If true, append to the end of the file instead of overwriting",
+                        "description": "If true, re-reads the note from disk after writing and appends its full content to the response for verification",
                         "default": false
-                    },
-                    "create_if_not_exists": {
-                        "type": "boolean",
-                        "description": "If false, returns an error when the file does not exist",
-                        "default": true
-                    },
-                    "mode": {
-                        "type": "string",
-                        "description": "Write mode: 'replace' to substitute old_text with content; 'insert' to add content before/after the first line containing anchor",
-                        "enum": ["replace", "insert"]
-                    },
-                    "old_text": {
-                        "type": "string",
-                        "description": "[replace mode] Text to find and replace. Error if not found."
-                    },
-                    "replace_all": {
-                        "type": "boolean",
-                        "description": "[replace mode] If true, replace all occurrences. Default: false (first only).",
-                        "default": false
-                    },
-                    "anchor": {
-                        "type": "string",
-                        "description": "[insert mode] Text to search for in lines. Inserts relative to the first matching line."
-                    },
-                    "insert_after": {
-                        "type": "boolean",
-                        "description": "[insert mode] If true (default), insert after the anchor line; if false, insert before it.",
-                        "default": true
                     }
                 },
                 "required": ["path", "content"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "append_note",
+            "description": "Appends content to the end of an Obsidian note (.md only), creating it if absent, and updates the local index. A newline is inserted first if the note does not end with one. With journal:true, the entry is prefixed with a local timestamp '[yyyy-MM-dd HH:mm:ss] ' and terminated with a newline.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Relative path to the note (must end with .md)"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Text to append"
+                    },
+                    "journal": {
+                        "type": "boolean",
+                        "description": "If true, prefix the entry with '[yyyy-MM-dd HH:mm:ss] ' (local time) and end it with a newline",
+                        "default": false
+                    },
+                    "read_back": {
+                        "type": "boolean",
+                        "description": "If true, re-reads the note from disk after writing and appends its full content to the response for verification",
+                        "default": false
+                    }
+                },
+                "required": ["path", "content"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "edit_note",
+            "description": "Replaces old_text with new_text in an existing Obsidian note (.md only) and updates the local index. Fails if old_text is not found, or if it matches more than once and replace_all is false — include surrounding context to make it unique.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Relative path to the note (must end with .md)"
+                    },
+                    "old_text": {
+                        "type": "string",
+                        "description": "Exact text to find"
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "description": "Replacement text (may be empty to delete old_text)"
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "If true, replace every occurrence",
+                        "default": false
+                    },
+                    "read_back": {
+                        "type": "boolean",
+                        "description": "If true, re-reads the note from disk after writing and appends its full content to the response for verification",
+                        "default": false
+                    }
+                },
+                "required": ["path", "old_text", "new_text"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "rollback_note",
+            "description": "Undoes the most recent write (create_note / update_note / append_note / edit_note / delete_note) to an Obsidian note. Each call goes back one more step (up to 20 per note). Undoing a write that created the note deletes it; undoing delete_note restores it. Fails if the note was changed by something else (e.g. edited in Obsidian) after that write, unless force is true. move_note is not covered.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Relative path to the note (must end with .md)"
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": "If true, roll back even if the note was changed externally after the last write (external changes are lost)",
+                        "default": false
+                    },
+                    "read_back": {
+                        "type": "boolean",
+                        "description": "If true, re-reads the note from disk after rolling back and appends its full content to the response",
+                        "default": false
+                    }
+                },
+                "required": ["path"]
             }
         }
         """));
@@ -1024,6 +1159,11 @@ static string BuildToolsListResponse(JsonNode? idNode)
                     "template": {
                         "type": "string",
                         "description": "Template name to use as initial content (e.g. 'daily' → templates/daily.md). Ignored if content is specified."
+                    },
+                    "read_back": {
+                        "type": "boolean",
+                        "description": "If true, re-reads the note from disk after writing and appends its full content to the response for verification",
+                        "default": false
                     }
                 },
                 "required": ["path"]
@@ -1138,7 +1278,7 @@ static string BuildToolsListResponse(JsonNode? idNode)
     tools.Add(JsonNode.Parse("""
         {
             "name": "kcell_write",
-            "description": "Writes a key-value pair to a named KnowledgeCell. Creates the cell automatically if it does not exist. Useful for persisting notes, session state, or cross-session instructions.",
+            "description": "Writes (overwrites) a key-value pair in a named KnowledgeCell. Creates the cell and key automatically if absent. Useful for persisting notes, session state, or cross-session instructions. Use kcell_append to add to a value, or kcell_edit to change part of it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1153,9 +1293,86 @@ static string BuildToolsListResponse(JsonNode? idNode)
                     "value": {
                         "type": "string",
                         "description": "Value to store"
+                    },
+                    "read_back": {
+                        "type": "boolean",
+                        "description": "If true, re-reads the value from the DB after writing and appends it to the response",
+                        "default": false
                     }
                 },
                 "required": ["cell_name", "key", "value"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "kcell_append",
+            "description": "Appends text to the end of a KnowledgeCell value, creating the key if absent. A newline is inserted first if the value does not end with one. With journal:true, the entry is prefixed with a local timestamp '[yyyy-MM-dd HH:mm:ss] ' and terminated with a newline.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cell_name": { "type": "string", "description": "Cell name" },
+                    "key": { "type": "string", "description": "Key" },
+                    "value": { "type": "string", "description": "Text to append" },
+                    "journal": {
+                        "type": "boolean",
+                        "description": "If true, prefix the entry with '[yyyy-MM-dd HH:mm:ss] ' (local time) and end it with a newline",
+                        "default": false
+                    },
+                    "read_back": {
+                        "type": "boolean",
+                        "description": "If true, re-reads the value from the DB after writing and appends it to the response",
+                        "default": false
+                    }
+                },
+                "required": ["cell_name", "key", "value"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "kcell_edit",
+            "description": "Replaces old_text with new_text in an existing KnowledgeCell value. Fails if the key does not exist, old_text is not found, or it matches more than once and replace_all is false.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cell_name": { "type": "string", "description": "Cell name" },
+                    "key": { "type": "string", "description": "Key" },
+                    "old_text": { "type": "string", "description": "Exact text to find" },
+                    "new_text": { "type": "string", "description": "Replacement text (may be empty to delete old_text)" },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "If true, replace every occurrence",
+                        "default": false
+                    },
+                    "read_back": {
+                        "type": "boolean",
+                        "description": "If true, re-reads the value from the DB after writing and appends it to the response",
+                        "default": false
+                    }
+                },
+                "required": ["cell_name", "key", "old_text", "new_text"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "kcell_rollback",
+            "description": "Undoes the most recent kcell_write / kcell_append / kcell_edit / kcell_delete on a KnowledgeCell, restoring the affected keys' previous values and timestamps. Each call goes back one more step (up to 20 per cell). Undoing a whole-cell delete restores all its keys.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cell_name": { "type": "string", "description": "Cell name" },
+                    "read_back": {
+                        "type": "boolean",
+                        "description": "If true, appends the restored keys' current values to the response",
+                        "default": false
+                    }
+                },
+                "required": ["cell_name"]
             }
         }
         """));
@@ -1210,6 +1427,17 @@ static string BuildToolsListResponse(JsonNode? idNode)
         {
             "name": "kcell_list",
             "description": "Lists all KnowledgeCells with their key count and last updated timestamp.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "server_info",
+            "description": "Returns MCPVault server information: version, build date, main vault path, guest vault status, indexed note counts, and log file path. Use this to check which vault is being operated on.",
             "inputSchema": {
                 "type": "object",
                 "properties": {}
@@ -1354,6 +1582,11 @@ static string BuildToolsListResponse(JsonNode? idNode)
                     "template": {
                         "type": "string",
                         "description": "Template name (e.g. 'daily' → templates/daily.md). Ignored if content is specified."
+                    },
+                    "read_back": {
+                        "type": "boolean",
+                        "description": "If true, re-reads the note from disk after writing and appends its full content to the response for verification",
+                        "default": false
                     }
                 },
                 "required": ["path"]
@@ -1364,27 +1597,78 @@ static string BuildToolsListResponse(JsonNode? idNode)
     tools.Add(JsonNode.Parse("""
         {
             "name": "guest_update_note",
-            "description": "Writes content to a note in the guest vault (.md only) and updates the guest index. Modes: overwrite (default), append, replace (old_text→content), insert (around anchor line).",
+            "description": "Overwrites a note in the guest vault (.md only), creating it if absent, and updates the guest index.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Relative path to the note (must end with .md)"
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "Content to write / replacement text / text to insert"
-                    },
-                    "append": { "type": "boolean", "default": false },
-                    "create_if_not_exists": { "type": "boolean", "default": true },
-                    "mode": { "type": "string", "enum": ["replace", "insert"] },
-                    "old_text": { "type": "string" },
-                    "replace_all": { "type": "boolean", "default": false },
-                    "anchor": { "type": "string" },
-                    "insert_after": { "type": "boolean", "default": true }
+                    "path": { "type": "string", "description": "Relative path to the note (must end with .md)" },
+                    "content": { "type": "string", "description": "Full new content of the note" },
+                    "read_back": {
+                        "type": "boolean",
+                        "description": "If true, re-reads the note from disk after writing and appends its full content to the response for verification",
+                        "default": false
+                    }
                 },
                 "required": ["path", "content"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "guest_append_note",
+            "description": "Appends content to the end of a note in the guest vault (.md only), creating it if absent. With journal:true, the entry is prefixed with '[yyyy-MM-dd HH:mm:ss] ' and terminated with a newline.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative path to the note (must end with .md)" },
+                    "content": { "type": "string", "description": "Text to append" },
+                    "journal": { "type": "boolean", "default": false },
+                    "read_back": {
+                        "type": "boolean",
+                        "description": "If true, re-reads the note from disk after writing and appends its full content to the response for verification",
+                        "default": false
+                    }
+                },
+                "required": ["path", "content"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "guest_edit_note",
+            "description": "Replaces old_text with new_text in an existing note in the guest vault. Fails if old_text is not found, or matches more than once without replace_all.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative path to the note (must end with .md)" },
+                    "old_text": { "type": "string", "description": "Exact text to find" },
+                    "new_text": { "type": "string", "description": "Replacement text" },
+                    "replace_all": { "type": "boolean", "default": false },
+                    "read_back": {
+                        "type": "boolean",
+                        "description": "If true, re-reads the note from disk after writing and appends its full content to the response for verification",
+                        "default": false
+                    }
+                },
+                "required": ["path", "old_text", "new_text"]
+            }
+        }
+        """));
+
+    tools.Add(JsonNode.Parse("""
+        {
+            "name": "guest_rollback_note",
+            "description": "Undoes the most recent write to a note in the guest vault; each call goes back one more step. History is discarded when the guest vault is closed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative path to the note (must end with .md)" },
+                    "force": { "type": "boolean", "default": false },
+                    "read_back": { "type": "boolean", "default": false }
+                },
+                "required": ["path"]
             }
         }
         """));
@@ -1505,7 +1789,7 @@ static string BuildErrorResponse(JsonNode? idNode, string message)
     return response.ToJsonString(jsonOptions);
 }
 
-// search_notes / search_vault の JSON-RPC レスポンスを構築して返す
+// search_notes の JSON-RPC レスポンスを構築して返す
 static string BuildSearchNotesResponse(JsonNode? idNode, string? query, string dbPath, int limit)
 {
     var jsonOptions = new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
@@ -1574,11 +1858,9 @@ static string BuildDeleteNoteResponse(JsonNode? idNode, string? relativePath, st
     {
         try
         {
-            string fullPath  = Path.GetFullPath(Path.Combine(vaultPath, relativePath.Replace('/', Path.DirectorySeparatorChar)));
-            string vaultFull = Path.GetFullPath(vaultPath);
-            if (!fullPath.StartsWith(vaultFull + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            if (ResolveVaultPath(relativePath, vaultPath, out string fullPath) is { } pathErr)
             {
-                text = $"Vault 外へのアクセスは禁止されています: {relativePath}";
+                text = pathErr;
             }
             else if (!File.Exists(fullPath))
             {
@@ -1586,9 +1868,13 @@ static string BuildDeleteNoteResponse(JsonNode? idNode, string? relativePath, st
             }
             else
             {
+                // rollback_note 用に削除前の内容を退避（.md のみ）
+                bool    isMd = relativePath.EndsWith(".md", StringComparison.OrdinalIgnoreCase);
+                string? prev = isMd ? File.ReadAllText(fullPath, Encoding.UTF8) : null;
                 File.Delete(fullPath);
                 using var index = new NoteIndex(dbPath);
                 index.Delete(relativePath.Replace('\\', '/'));
+                if (isMd) RecordHistory(dbPath, relativePath, "delete", prev, null);
                 text = $"削除しました: {relativePath}";
             }
         }
@@ -1631,14 +1917,12 @@ static string BuildMoveNoteResponse(JsonNode? idNode, string? srcPath, string? d
     {
         try
         {
-            string vaultFull = Path.GetFullPath(vaultPath);
-            string fullSrc   = Path.GetFullPath(Path.Combine(vaultPath, srcPath.Replace('/', Path.DirectorySeparatorChar)));
-            string fullDst   = Path.GetFullPath(Path.Combine(vaultPath, dstPath.Replace('/', Path.DirectorySeparatorChar)));
+            string? srcErr = ResolveVaultPath(srcPath, vaultPath, out string fullSrc);
+            string? dstErr = ResolveVaultPath(dstPath, vaultPath, out string fullDst);
 
-            if (!fullSrc.StartsWith(vaultFull + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
-                !fullDst.StartsWith(vaultFull + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            if ((srcErr ?? dstErr) is { } pathErr)
             {
-                text = "Vault 外へのアクセスは禁止されています。";
+                text = pathErr;
             }
             else if (!File.Exists(fullSrc))
             {
@@ -1745,11 +2029,9 @@ static string BuildCreateFolderResponse(JsonNode? idNode, string? relativePath, 
     {
         try
         {
-            string fullPath  = Path.GetFullPath(Path.Combine(vaultPath, relativePath.Replace('/', Path.DirectorySeparatorChar)));
-            string vaultFull = Path.GetFullPath(vaultPath);
-            if (!fullPath.StartsWith(vaultFull + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            if (ResolveVaultPath(relativePath, vaultPath, out string fullPath) is { } pathErr)
             {
-                text = $"Vault 外へのアクセスは禁止されています: {relativePath}";
+                text = pathErr;
             }
             else if (Directory.Exists(fullPath))
             {
@@ -1812,14 +2094,12 @@ static string BuildRenameFolderResponse(JsonNode? idNode, string? srcPath, strin
     {
         try
         {
-            string vaultFull = Path.GetFullPath(vaultPath);
-            string fullSrc   = Path.GetFullPath(Path.Combine(vaultPath, srcPath.Replace('/', Path.DirectorySeparatorChar)));
-            string fullDst   = Path.GetFullPath(Path.Combine(vaultPath, dstPath.Replace('/', Path.DirectorySeparatorChar)));
+            string? srcErr = ResolveVaultPath(srcPath, vaultPath, out string fullSrc);
+            string? dstErr = ResolveVaultPath(dstPath, vaultPath, out string fullDst);
 
-            if (!fullSrc.StartsWith(vaultFull + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
-                !fullDst.StartsWith(vaultFull + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            if ((srcErr ?? dstErr) is { } pathErr)
             {
-                text = "Vault 外へのアクセスは禁止されています。";
+                text = pathErr;
             }
             else if (!Directory.Exists(fullSrc))
             {
@@ -1883,11 +2163,9 @@ static string BuildDeleteEmptyFolderResponse(JsonNode? idNode, string? relativeP
     {
         try
         {
-            string fullPath  = Path.GetFullPath(Path.Combine(vaultPath, relativePath.Replace('/', Path.DirectorySeparatorChar)));
-            string vaultFull = Path.GetFullPath(vaultPath);
-            if (!fullPath.StartsWith(vaultFull + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            if (ResolveVaultPath(relativePath, vaultPath, out string fullPath) is { } pathErr)
             {
-                text = "Vault 外へのアクセスは禁止されています。";
+                text = pathErr;
             }
             else if (!Directory.Exists(fullPath))
             {
@@ -1926,7 +2204,7 @@ static string BuildDeleteEmptyFolderResponse(JsonNode? idNode, string? relativeP
 
 // px_create_note の JSON-RPC レスポンスを構築して返す（新規ノート作成 + インデックス更新）
 static string BuildCreateNoteResponse(JsonNode? idNode, string? relativePath, string? content,
-    string? templateName, string vaultPath, string dbPath)
+    string? templateName, bool readBack, string vaultPath, string dbPath)
 {
     var jsonOptions = new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
@@ -1943,11 +2221,9 @@ static string BuildCreateNoteResponse(JsonNode? idNode, string? relativePath, st
     {
         try
         {
-            string fullPath  = Path.GetFullPath(Path.Combine(vaultPath, relativePath.Replace('/', Path.DirectorySeparatorChar)));
-            string vaultFull = Path.GetFullPath(vaultPath);
-            if (!fullPath.StartsWith(vaultFull + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            if (ResolveVaultPath(relativePath, vaultPath, out string fullPath) is { } pathErr)
             {
-                text = $"Vault 外へのアクセスは禁止されています: {relativePath}";
+                text = pathErr;
             }
             else if (File.Exists(fullPath))
             {
@@ -1961,10 +2237,12 @@ static string BuildCreateNoteResponse(JsonNode? idNode, string? relativePath, st
                 Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
                 File.WriteAllText(fullPath, body, Encoding.UTF8);
                 UpsertNote(relativePath, fullPath, body, dbPath);
+                RecordHistory(dbPath, relativePath, "create", null, body);
 
                 string tmplLabel = content != null ? "" :
                                    templateName != null ? $" (template: {templateName})" : "";
-                text = $"作成しました{tmplLabel}: {relativePath} ({FormatSize(body.Length)})";
+                text = WithReadBack($"作成しました{tmplLabel}: {relativePath} ({FormatSize(body.Length)})",
+                    readBack, relativePath, fullPath);
             }
         }
         catch (Exception ex)
@@ -2013,8 +2291,7 @@ static string? ResolveTemplate(string? templateName, string vaultPath, string db
     // フォールバック: ファイルから直接読む
     try
     {
-        string fullPath = Path.Combine(vaultPath, tmplRelPath.Replace('/', Path.DirectorySeparatorChar));
-        if (File.Exists(fullPath))
+        if (ResolveVaultPath(tmplRelPath, vaultPath, out string fullPath) is null && File.Exists(fullPath))
             return File.ReadAllText(fullPath, Encoding.UTF8);
     }
     catch { }
@@ -2022,118 +2299,62 @@ static string? ResolveTemplate(string? templateName, string vaultPath, string db
     return null;
 }
 
-// px_update_note の JSON-RPC レスポンスを構築して返す（ノート書き込み + インデックス更新）
-static string BuildUpdateNoteResponse(JsonNode? idNode, string? relativePath, string? content,
-    bool append, bool createIfNotExists,
-    string? mode, string? oldText, bool replaceAll, string? anchor, bool insertAfter,
-    string vaultPath, string dbPath)
+// パストラバーサル防止: 相対パスをフルパスに展開して Vault 配下かチェック。OK なら null を返し fullPath を設定する
+// （../ や絶対パスで Vault 外を指す場合はエラー。メイン／ゲストの区別がつくようエラーに Vault ルートを含める）
+static string? ResolveVaultPath(string relativePath, string vaultPath, out string fullPath)
+{
+    fullPath         = Path.GetFullPath(Path.Combine(vaultPath, relativePath.Replace('/', Path.DirectorySeparatorChar)));
+    string vaultFull = Path.GetFullPath(vaultPath);
+    return fullPath.StartsWith(vaultFull + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+        ? null
+        : $"Vault 外へのアクセスは禁止されています（Vault: {vaultFull}）: {relativePath}";
+}
+
+// 書き込み系ツール共通の path 検証（.md 限定・Vault 外アクセス禁止）。OK なら null を返し fullPath を設定する
+static string? ValidateWritableNotePath(string? relativePath, string vaultPath, out string fullPath)
+{
+    fullPath = "";
+    if (string.IsNullOrWhiteSpace(relativePath))
+        return "path が指定されていません。";
+    if (!relativePath.EndsWith(".md", StringComparison.OrdinalIgnoreCase))
+        return $".md 以外のファイルへの書き込みは禁止されています: {relativePath}";
+    return ResolveVaultPath(relativePath, vaultPath, out fullPath);
+}
+
+// append_note / kcell_append 共通: src の末尾に付け足す文字列を作る
+// 既存内容が改行で終わっていなければ区切りの改行を入れ、journal=true なら [yyyy-MM-dd HH:mm:ss] を付けて改行で終える
+static string BuildAppendEntry(string src, string content, bool journal)
+{
+    string lineEnding = src.Contains("\r\n") ? "\r\n" : "\n";
+    string entry      = journal ? $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {content}" : content;
+    if (src.Length > 0 && !src.EndsWith('\n'))
+        entry = lineEnding + entry;
+    if (journal && !entry.EndsWith('\n'))
+        entry += lineEnding;
+    return entry;
+}
+
+// edit_note / kcell_edit 共通: old_text → new_text の置換。OK なら null を返し result/count を設定する
+static string? ReplaceText(string src, string oldText, string newText, bool replaceAll, out string result, out int count)
+{
+    result = src;
+    count  = (src.Length - src.Replace(oldText, "").Length) / oldText.Length;
+    if (count == 0)
+        return $"old_text が見つかりませんでした: 「{oldText[..Math.Min(oldText.Length, 40)]}…」";
+    if (count > 1 && !replaceAll)
+        return $"old_text が {count} 箇所に一致しました。一意になるよう前後の文脈を含めるか、replace_all=true を指定してください。";
+    result = src.Replace(oldText, newText);
+    return null;
+}
+
+// read_back=true の場合、書き込み完了メッセージの後ろにディスクから読み直したノート内容を付ける
+static string WithReadBack(string message, bool readBack, string relativePath, string fullPath) =>
+    readBack ? $"{message}\n\n=== {relativePath} ===\n{File.ReadAllText(fullPath, Encoding.UTF8)}" : message;
+
+// テキスト 1 件の tools/call レスポンスを構築する
+static string BuildTextResponse(JsonNode? idNode, string text)
 {
     var jsonOptions = new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
-
-    string text;
-    if (string.IsNullOrWhiteSpace(relativePath))
-    {
-        text = "path が指定されていません。";
-    }
-    else if (content is null)
-    {
-        text = "content が指定されていません。";
-    }
-    else if (!relativePath.EndsWith(".md", StringComparison.OrdinalIgnoreCase))
-    {
-        text = $".md 以外のファイルへの書き込みは禁止されています: {relativePath}";
-    }
-    else
-    {
-        try
-        {
-            // パストラバーサル防止: フルパスに展開して Vault 配下かチェック
-            string fullPath  = Path.GetFullPath(Path.Combine(vaultPath, relativePath.Replace('/', Path.DirectorySeparatorChar)));
-            string vaultFull = Path.GetFullPath(vaultPath);
-            if (!fullPath.StartsWith(vaultFull + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-            {
-                text = $"Vault 外へのアクセスは禁止されています: {relativePath}";
-            }
-            else if (!File.Exists(fullPath) && !createIfNotExists)
-            {
-                text = $"ノートが存在しません（create_if_not_exists=false）: {relativePath}";
-            }
-            else if (mode == "replace")
-            {
-                if (string.IsNullOrEmpty(oldText))
-                {
-                    text = "replace モードには old_text が必要です。";
-                }
-                else
-                {
-                    string src = File.Exists(fullPath) ? File.ReadAllText(fullPath, Encoding.UTF8) : "";
-                    if (!src.Contains(oldText))
-                    {
-                        text = $"old_text が見つかりませんでした: 「{oldText[..Math.Min(oldText.Length, 40)]}…」";
-                    }
-                    else
-                    {
-                        string written = replaceAll
-                            ? src.Replace(oldText, content)
-                            : ReplaceFirst(src, oldText, content);
-                        File.WriteAllText(fullPath, written, Encoding.UTF8);
-                        int count = replaceAll
-                            ? (src.Length - src.Replace(oldText, "").Length) / oldText.Length
-                            : 1;
-                        UpsertNote(relativePath, fullPath, written, dbPath);
-                        text = $"置換しました ({count}箇所): {relativePath} ({FormatSize(written.Length)})";
-                    }
-                }
-            }
-            else if (mode == "insert")
-            {
-                if (string.IsNullOrEmpty(anchor))
-                {
-                    text = "insert モードには anchor が必要です。";
-                }
-                else
-                {
-                    string src = File.Exists(fullPath) ? File.ReadAllText(fullPath, Encoding.UTF8) : "";
-                    string lineEnding = src.Contains("\r\n") ? "\r\n" : "\n";
-                    var lines = src.Split('\n').Select(l => l.TrimEnd('\r')).ToList();
-                    int idx = lines.FindIndex(l => l.Contains(anchor));
-                    if (idx < 0)
-                    {
-                        text = $"anchor が見つかりませんでした: 「{anchor}」";
-                    }
-                    else
-                    {
-                        int insertAt = insertAfter ? idx + 1 : idx;
-                        lines.Insert(insertAt, content);
-                        string written = string.Join(lineEnding, lines);
-                        File.WriteAllText(fullPath, written, Encoding.UTF8);
-                        UpsertNote(relativePath, fullPath, written, dbPath);
-                        string pos = insertAfter ? $"「{anchor}」の後" : $"「{anchor}」の前";
-                        text = $"挿入しました ({pos}): {relativePath} ({FormatSize(written.Length)})";
-                    }
-                }
-            }
-            else
-            {
-                // 上書き / 追記モード
-                Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
-
-                if (append && File.Exists(fullPath))
-                    File.AppendAllText(fullPath, content, Encoding.UTF8);
-                else
-                    File.WriteAllText(fullPath, content, Encoding.UTF8);
-
-                string written = File.ReadAllText(fullPath, Encoding.UTF8);
-                UpsertNote(relativePath, fullPath, written, dbPath);
-                text = $"{(append ? "追記" : "上書き")}しました: {relativePath} ({FormatSize(written.Length)})";
-            }
-        }
-        catch (Exception ex)
-        {
-            text = $"エラー: {ex.Message}";
-        }
-    }
-
     var response = new JsonObject
     {
         ["jsonrpc"] = "2.0",
@@ -2149,11 +2370,173 @@ static string BuildUpdateNoteResponse(JsonNode? idNode, string? relativePath, st
     return response.ToJsonString(jsonOptions);
 }
 
-// 最初の1件のみ置換するヘルパー
-static string ReplaceFirst(string src, string oldText, string newText)
+// update_note: ノートを上書き（存在しなければ作成）+ インデックス更新
+static string BuildUpdateNoteResponse(JsonNode? idNode, string? relativePath, string? content,
+    bool readBack, string vaultPath, string dbPath)
 {
-    int pos = src.IndexOf(oldText, StringComparison.Ordinal);
-    return pos < 0 ? src : src[..pos] + newText + src[(pos + oldText.Length)..];
+    string text;
+    try
+    {
+        string? err = ValidateWritableNotePath(relativePath, vaultPath, out string fullPath);
+        if (err != null)
+            text = err;
+        else if (content is null)
+            text = "content が指定されていません。";
+        else
+        {
+            string? prev = File.Exists(fullPath) ? File.ReadAllText(fullPath, Encoding.UTF8) : null;
+            Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+            File.WriteAllText(fullPath, content, Encoding.UTF8);
+            UpsertNote(relativePath!, fullPath, content, dbPath);
+            RecordHistory(dbPath, relativePath!, "update", prev, content);
+            text = WithReadBack($"上書きしました: {relativePath} ({FormatSize(content.Length)})",
+                readBack, relativePath!, fullPath);
+        }
+    }
+    catch (Exception ex)
+    {
+        text = $"エラー: {ex.Message}";
+    }
+    return BuildTextResponse(idNode, text);
+}
+
+// append_note: ノート末尾に追記（存在しなければ作成）+ インデックス更新
+// journal=true の場合は先頭に [yyyy-MM-dd HH:mm:ss] を付けて 1 行として追記する
+static string BuildAppendNoteResponse(JsonNode? idNode, string? relativePath, string? content, bool journal,
+    bool readBack, string vaultPath, string dbPath)
+{
+    string text;
+    try
+    {
+        string? err = ValidateWritableNotePath(relativePath, vaultPath, out string fullPath);
+        if (err != null)
+            text = err;
+        else if (content is null)
+            text = "content が指定されていません。";
+        else
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+            bool   existed    = File.Exists(fullPath);
+            string src        = existed ? File.ReadAllText(fullPath, Encoding.UTF8) : "";
+            string entry      = BuildAppendEntry(src, content, journal);
+
+            File.AppendAllText(fullPath, entry, Encoding.UTF8);
+            string written = src + entry;
+            UpsertNote(relativePath!, fullPath, written, dbPath);
+            RecordHistory(dbPath, relativePath!, "append", existed ? src : null, written);
+            text = WithReadBack($"{(journal ? "ジャーナル追記" : "追記")}しました: {relativePath} ({FormatSize(written.Length)})",
+                readBack, relativePath!, fullPath);
+        }
+    }
+    catch (Exception ex)
+    {
+        text = $"エラー: {ex.Message}";
+    }
+    return BuildTextResponse(idNode, text);
+}
+
+// edit_note: old_text → new_text の文字列置換（ノートが存在しなければエラー）+ インデックス更新
+static string BuildEditNoteResponse(JsonNode? idNode, string? relativePath, string? oldText, string? newText,
+    bool replaceAll, bool readBack, string vaultPath, string dbPath)
+{
+    string text;
+    try
+    {
+        string? err = ValidateWritableNotePath(relativePath, vaultPath, out string fullPath);
+        if (err != null)
+            text = err;
+        else if (string.IsNullOrEmpty(oldText))
+            text = "old_text が指定されていません。";
+        else if (newText is null)
+            text = "new_text が指定されていません。";
+        else if (!File.Exists(fullPath))
+            text = $"ノートが存在しません: {relativePath}";
+        else
+        {
+            string  src        = File.ReadAllText(fullPath, Encoding.UTF8);
+            string? replaceErr = ReplaceText(src, oldText, newText, replaceAll, out string written, out int count);
+            if (replaceErr != null)
+                text = replaceErr;
+            else
+            {
+                File.WriteAllText(fullPath, written, Encoding.UTF8);
+                UpsertNote(relativePath!, fullPath, written, dbPath);
+                RecordHistory(dbPath, relativePath!, "edit", src, written);
+                text = WithReadBack($"置換しました ({count}箇所): {relativePath} ({FormatSize(written.Length)})",
+                    readBack, relativePath!, fullPath);
+            }
+        }
+    }
+    catch (Exception ex)
+    {
+        text = $"エラー: {ex.Message}";
+    }
+    return BuildTextResponse(idNode, text);
+}
+
+// rollback_note 用の書き込み履歴を記録する（書き込み成功後に呼ぶ）
+// prevContent = null: 書き込み前はファイルなし / afterContent = null: 書き込み後はファイルなし
+static void RecordHistory(string dbPath, string relativePath, string op, string? prevContent, string? afterContent)
+{
+    using var index = new NoteIndex(dbPath);
+    index.AddHistory(relativePath.Replace('\\', '/'), op, prevContent,
+        afterContent is null ? null : NoteIndex.ComputeHash(afterContent));
+}
+
+// rollback_note: 直前の書き込みを 1 回分取り消す（呼ぶたびに 1 段ずつ戻る）
+static string BuildRollbackNoteResponse(JsonNode? idNode, string? relativePath, bool force, bool readBack,
+    string vaultPath, string dbPath)
+{
+    string text;
+    try
+    {
+        string? err = ValidateWritableNotePath(relativePath, vaultPath, out string fullPath);
+        if (err != null)
+        {
+            text = err;
+        }
+        else
+        {
+            string    normPath = relativePath!.Replace('\\', '/');
+            using var index    = new NoteIndex(dbPath);
+            var       hist     = index.GetLatestHistory(normPath);
+            string?   curHash  = File.Exists(fullPath) ? NoteIndex.ComputeHash(File.ReadAllText(fullPath, Encoding.UTF8)) : null;
+
+            if (hist is null)
+            {
+                text = $"ロールバックできる履歴がありません: {relativePath}";
+            }
+            else if (curHash != hist.AfterHash && !force)
+            {
+                text = $"{hist.Op} の後にノートが変更されています（Obsidian での編集など）。force=true で強制的に戻せます: {relativePath}";
+            }
+            else
+            {
+                if (hist.PrevContent is null)
+                {
+                    if (File.Exists(fullPath)) File.Delete(fullPath);
+                    index.Delete(normPath);
+                }
+                else
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+                    File.WriteAllText(fullPath, hist.PrevContent, Encoding.UTF8);
+                    UpsertNote(normPath, fullPath, hist.PrevContent, dbPath);
+                }
+                index.DeleteHistory(hist.Id);
+
+                string msg = $"ロールバックしました（{hist.Op} を取り消し）: {relativePath}（残り履歴 {index.CountHistory(normPath)} 件）";
+                text = hist.PrevContent is null
+                    ? msg + "\n書き込み前はノートが存在しなかったため、削除しました。"
+                    : WithReadBack(msg, readBack, relativePath, fullPath);
+            }
+        }
+    }
+    catch (Exception ex)
+    {
+        text = $"エラー: {ex.Message}";
+    }
+    return BuildTextResponse(idNode, text);
 }
 
 // ノートのインデックス更新ヘルパー（書き込み後の共通処理）
@@ -2205,8 +2588,8 @@ static int UpdateWikiLinksForNote(string oldRelPath, string newRelPath, string v
     {
         if (relativePath.Equals(newRelPath, StringComparison.OrdinalIgnoreCase)) continue;
 
-        string fullPath = Path.Combine(vaultPath, relativePath.Replace('/', Path.DirectorySeparatorChar));
-        if (!File.Exists(fullPath)) continue;
+        // インデックスに Vault 外のパスが紛れていても書き換えない
+        if (ResolveVaultPath(relativePath, vaultPath, out string fullPath) != null || !File.Exists(fullPath)) continue;
 
         try
         {
@@ -2242,8 +2625,8 @@ static int UpdateWikiLinksForFolder(string oldFolderPath, string newFolderPath, 
     int updatedCount = 0;
     foreach (var relativePath in paths)
     {
-        string fullPath = Path.Combine(vaultPath, relativePath.Replace('/', Path.DirectorySeparatorChar));
-        if (!File.Exists(fullPath)) continue;
+        // インデックスに Vault 外のパスが紛れていても書き換えない
+        if (ResolveVaultPath(relativePath, vaultPath, out string fullPath) != null || !File.Exists(fullPath)) continue;
 
         try
         {
@@ -2277,8 +2660,11 @@ static string BuildReadNoteResponse(JsonNode? idNode, string? relativePath, stri
     {
         try
         {
-            string fullPath = Path.Combine(vaultPath, relativePath.Replace('/', Path.DirectorySeparatorChar));
-            if (!File.Exists(fullPath))
+            if (ResolveVaultPath(relativePath, vaultPath, out string fullPath) is { } pathErr)
+            {
+                text = pathErr;
+            }
+            else if (!File.Exists(fullPath))
             {
                 text = $"ノートが見つかりません: {relativePath}";
             }
@@ -2343,8 +2729,11 @@ static string BuildReadMultipleNotesResponse(JsonNode? idNode, string[] paths, s
             sb.AppendLine($"=== {relativePath} ===");
             try
             {
-                string fullPath = Path.Combine(vaultPath, relativePath.Replace('/', Path.DirectorySeparatorChar));
-                if (!File.Exists(fullPath))
+                if (ResolveVaultPath(relativePath, vaultPath, out string fullPath) is { } pathErr)
+                {
+                    sb.AppendLine($"({pathErr})");
+                }
+                else if (!File.Exists(fullPath))
                 {
                     sb.AppendLine($"(ノートが見つかりません: {relativePath})");
                 }
@@ -2567,10 +2956,19 @@ static bool IsPatternExcluded(string folder, bool exDot, bool exUnderscore, bool
         name.Equals(".mvn",         StringComparison.OrdinalIgnoreCase);
 }
 
-// kcell_write の JSON-RPC レスポンスを構築して返す
-static string BuildKcellWriteResponse(JsonNode? idNode, string? cellName, string? key, string? value, string dbPath)
+// read_back=true の場合、kcell 書き込み完了メッセージの後ろに DB から読み直した値を付ける
+static string WithKcellReadBack(string message, bool readBack, KnowledgeCell kc, string cellName, IEnumerable<string> keys)
 {
-    var jsonOptions = new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+    if (!readBack) return message;
+    var sb = new StringBuilder(message);
+    foreach (var key in keys)
+        sb.Append($"\n\n=== [{cellName}] {key} ===\n{kc.Get(cellName, key)?.Value ?? "(存在しません)"}");
+    return sb.ToString();
+}
+
+// kcell_write: キーの値を上書き（存在しなければ作成）
+static string BuildKcellWriteResponse(JsonNode? idNode, string? cellName, string? key, string? value, bool readBack, string dbPath)
+{
     string text;
     if (string.IsNullOrWhiteSpace(cellName) || string.IsNullOrWhiteSpace(key) || value is null)
     {
@@ -2582,20 +2980,91 @@ static string BuildKcellWriteResponse(JsonNode? idNode, string? cellName, string
         {
             using var kc = new KnowledgeCell(dbPath);
             kc.Write(cellName, key, value);
-            text = $"書き込みました: [{cellName}] {key}";
+            text = WithKcellReadBack($"書き込みました: [{cellName}] {key}", readBack, kc, cellName, [key]);
         }
         catch (Exception ex) { text = $"エラー: {ex.Message}"; }
     }
-    var response = new JsonObject
+    return BuildTextResponse(idNode, text);
+}
+
+// kcell_append: キーの値の末尾に追記（存在しなければ作成）。journal の扱いは append_note と同じ
+static string BuildKcellAppendResponse(JsonNode? idNode, string? cellName, string? key, string? value, bool journal,
+    bool readBack, string dbPath)
+{
+    string text;
+    if (string.IsNullOrWhiteSpace(cellName) || string.IsNullOrWhiteSpace(key) || value is null)
     {
-        ["jsonrpc"] = "2.0",
-        ["id"]      = idNode?.DeepClone(),
-        ["result"]  = new JsonObject
+        text = "cell_name, key, value はすべて必須です。";
+    }
+    else
+    {
+        try
         {
-            ["content"] = new JsonArray { new JsonObject { ["type"] = "text", ["text"] = text } }
+            using var kc  = new KnowledgeCell(dbPath);
+            string    src = kc.Get(cellName, key)?.Value ?? "";
+            kc.Write(cellName, key, src + BuildAppendEntry(src, value, journal), "append");
+            text = WithKcellReadBack($"{(journal ? "ジャーナル追記" : "追記")}しました: [{cellName}] {key}",
+                readBack, kc, cellName, [key]);
         }
-    };
-    return response.ToJsonString(jsonOptions);
+        catch (Exception ex) { text = $"エラー: {ex.Message}"; }
+    }
+    return BuildTextResponse(idNode, text);
+}
+
+// kcell_edit: キーの値の old_text → new_text 置換（キーが存在しなければエラー）。一致判定は edit_note と同じ
+static string BuildKcellEditResponse(JsonNode? idNode, string? cellName, string? key, string? oldText, string? newText,
+    bool replaceAll, bool readBack, string dbPath)
+{
+    string text;
+    if (string.IsNullOrWhiteSpace(cellName) || string.IsNullOrWhiteSpace(key) || string.IsNullOrEmpty(oldText) || newText is null)
+    {
+        text = "cell_name, key, old_text, new_text はすべて必須です。";
+    }
+    else
+    {
+        try
+        {
+            using var kc  = new KnowledgeCell(dbPath);
+            var       cur = kc.Get(cellName, key);
+            if (cur is null)
+                text = $"[{cellName}] キー「{key}」は存在しません。";
+            else if (ReplaceText(cur.Value.Value, oldText, newText, replaceAll, out string written, out int count) is { } err)
+                text = err;
+            else
+            {
+                kc.Write(cellName, key, written, "edit");
+                text = WithKcellReadBack($"置換しました ({count}箇所): [{cellName}] {key}", readBack, kc, cellName, [key]);
+            }
+        }
+        catch (Exception ex) { text = $"エラー: {ex.Message}"; }
+    }
+    return BuildTextResponse(idNode, text);
+}
+
+// kcell_rollback: セルへの直前の操作（write / append / edit / delete）を 1 回分取り消す
+static string BuildKcellRollbackResponse(JsonNode? idNode, string? cellName, bool readBack, string dbPath)
+{
+    string text;
+    if (string.IsNullOrWhiteSpace(cellName))
+    {
+        text = "cell_name は必須です。";
+    }
+    else
+    {
+        try
+        {
+            using var kc     = new KnowledgeCell(dbPath);
+            var       result = kc.Rollback(cellName);
+            if (result is not { } r)
+                text = $"ロールバックできる履歴がありません: [{cellName}]";
+            else
+                text = WithKcellReadBack(
+                    $"ロールバックしました（{r.Op} を取り消し）: [{cellName}] {string.Join(", ", r.Keys)}（残り履歴 {r.Remaining} 件）",
+                    readBack, kc, cellName, r.Keys);
+        }
+        catch (Exception ex) { text = $"エラー: {ex.Message}"; }
+    }
+    return BuildTextResponse(idNode, text);
 }
 
 // kcell_read の JSON-RPC レスポンスを構築して返す
@@ -2705,6 +3174,41 @@ static string BuildKcellDeleteResponse(JsonNode? idNode, string? cellName, strin
         }
     };
     return response.ToJsonString(jsonOptions);
+}
+
+// server_info: バージョン・ビルド日・Vault の場所・インデックス件数などを返す
+static string BuildServerInfoResponse(JsonNode? idNode, string version, string buildDate,
+    string? vaultPath, string dbPath, string? guestVaultPath, string guestDbPath, string? logPath)
+{
+    // インデックス済みノート数（DB 未作成ならインデックス構築前）
+    static string CountNotes(string db)
+    {
+        if (!File.Exists(db)) return "インデックス未作成";
+        try
+        {
+            using var index = new NoteIndex(db);
+            // include_folder_names 有効時はフォルダも notes に入るため .md のみ数える
+            return $"{index.ListPaths().Count(p => p.EndsWith(".md", StringComparison.OrdinalIgnoreCase))} 件";
+        }
+        catch (Exception ex) { return $"取得エラー: {ex.Message}"; }
+    }
+
+    var sb = new StringBuilder();
+    sb.AppendLine($"MCPVault {version} (build {buildDate})");
+    sb.AppendLine($"メインVault: {vaultPath ?? "(未設定)"}");
+    sb.AppendLine($"  インデックス済みノート: {CountNotes(dbPath)}");
+    sb.AppendLine($"  データフォルダ: {Path.GetDirectoryName(dbPath)}");
+    if (guestVaultPath != null)
+    {
+        sb.AppendLine($"ゲストVault: {guestVaultPath}");
+        sb.AppendLine($"  インデックス済みノート: {CountNotes(guestDbPath)}");
+    }
+    else
+    {
+        sb.AppendLine("ゲストVault: (未オープン)");
+    }
+    sb.Append($"ログファイル: {logPath ?? "(無効)"}");
+    return BuildTextResponse(idNode, sb.ToString());
 }
 
 // kcell_list の JSON-RPC レスポンスを構築して返す
