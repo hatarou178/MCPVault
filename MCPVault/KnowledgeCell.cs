@@ -10,7 +10,7 @@ public sealed class KnowledgeCell : IDisposable
     public KnowledgeCell(string dbPath)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
-        _db = new SqliteConnection($"Data Source={dbPath}");
+        _db = new SqliteConnection($"Data Source={dbPath}") { DefaultTimeout = 15 };
         _db.Open();
         ApplySchema();
     }
@@ -48,17 +48,33 @@ public sealed class KnowledgeCell : IDisposable
             CREATE INDEX IF NOT EXISTS idx_kcell_items_op   ON kcell_op_items (op_id);
             """;
         cmd.ExecuteNonQuery();
+        EnsureVersionColumn();
     }
 
-    /// <summary>1 キーの値と更新日時を返す。存在しなければ null。</summary>
-    public (string Value, long UpdatedAt)? Get(string cellName, string key)
+    // 2.0: キーごとの version 列（書き込みごとに +1）。旧 DB には列を追加する
+    private void EnsureVersionColumn()
+    {
+        using var check = _db.CreateCommand();
+        check.CommandText = "SELECT COUNT(*) FROM pragma_table_info('knowledge_cells') WHERE name = 'version'";
+        if ((long)check.ExecuteScalar()! > 0) return;
+        try
+        {
+            using var alter = _db.CreateCommand();
+            alter.CommandText = "ALTER TABLE knowledge_cells ADD COLUMN version INTEGER NOT NULL DEFAULT 1";
+            alter.ExecuteNonQuery();
+        }
+        catch (SqliteException ex) when (ex.Message.Contains("duplicate column", StringComparison.OrdinalIgnoreCase)) { }
+    }
+
+    /// <summary>1 キーの値・更新日時・version を返す。存在しなければ null。</summary>
+    public KcellEntry? Get(string cellName, string key)
     {
         using var cmd = _db.CreateCommand();
-        cmd.CommandText = "SELECT value, updated_at FROM knowledge_cells WHERE cell_name = $cell AND key = $key";
+        cmd.CommandText = "SELECT value, updated_at, version FROM knowledge_cells WHERE cell_name = $cell AND key = $key";
         cmd.Parameters.AddWithValue("$cell", cellName);
         cmd.Parameters.AddWithValue("$key",  key);
         using var r = cmd.ExecuteReader();
-        return r.Read() ? (r.GetString(0), r.GetInt64(1)) : null;
+        return r.Read() ? new KcellEntry(r.GetString(0), r.GetInt64(1), r.GetInt64(2)) : null;
     }
 
     /// <summary>値を書き込む（upsert）。op は履歴に残す操作名（write / append / edit）。</summary>
@@ -70,11 +86,12 @@ public sealed class KnowledgeCell : IDisposable
         using var cmd = _db.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = """
-            INSERT INTO knowledge_cells (cell_name, key, value, updated_at)
-            VALUES ($cell, $key, $val, $now)
+            INSERT INTO knowledge_cells (cell_name, key, value, updated_at, version)
+            VALUES ($cell, $key, $val, $now, 1)
             ON CONFLICT(cell_name, key) DO UPDATE SET
                 value      = excluded.value,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                version    = knowledge_cells.version + 1
             """;
         cmd.Parameters.AddWithValue("$cell", cellName);
         cmd.Parameters.AddWithValue("$key",  key);
@@ -111,6 +128,60 @@ public sealed class KnowledgeCell : IDisposable
         while (r.Read())
             result.Add((r.GetString(0), r.GetString(1), r.GetInt64(2)));
         return result;
+    }
+
+    /// <summary>全セルの全エントリを更新日時降順で返す（limit 指定可）。</summary>
+    public IEnumerable<(string Cell, string Key, string Value, long UpdatedAt)> ReadAll(int? limit = null)
+    {
+        using var cmd = _db.CreateCommand();
+        cmd.CommandText = "SELECT cell_name, key, value, updated_at FROM knowledge_cells ORDER BY updated_at DESC"
+                        + (limit is null ? "" : " LIMIT $limit");
+        if (limit is { } l) cmd.Parameters.AddWithValue("$limit", l);
+        using var r = cmd.ExecuteReader();
+        var result = new List<(string, string, string, long)>();
+        while (r.Read())
+            result.Add((r.GetString(0), r.GetString(1), r.GetString(2), r.GetInt64(3)));
+        return result;
+    }
+
+    /// <summary>キーを別のセル／キー名へ移す（値はそのまま、更新日時は今）。セルごとに履歴を残す。</summary>
+    public void Move(string cellName, string key, string newCellName, string newKey)
+    {
+        var cur = Get(cellName, key) ?? throw new InvalidOperationException($"not found: {cellName}/{key}");
+
+        using var tx = _db.BeginTransaction();
+        if (cellName == newCellName)
+            RecordOp(tx, cellName, "move", [key, newKey]);
+        else
+        {
+            RecordOp(tx, cellName,    "move", [key]);
+            RecordOp(tx, newCellName, "move", [newKey]);
+        }
+
+        using (var del = _db.CreateCommand())
+        {
+            del.Transaction = tx;
+            del.CommandText = "DELETE FROM knowledge_cells WHERE cell_name = $cell AND key = $key";
+            del.Parameters.AddWithValue("$cell", cellName);
+            del.Parameters.AddWithValue("$key",  key);
+            del.ExecuteNonQuery();
+        }
+        using (var ins = _db.CreateCommand())
+        {
+            ins.Transaction = tx;
+            ins.CommandText = """
+                INSERT INTO knowledge_cells (cell_name, key, value, updated_at, version)
+                VALUES ($cell, $key, $val, $now, 1)
+                ON CONFLICT(cell_name, key) DO UPDATE SET
+                    value = excluded.value, updated_at = excluded.updated_at, version = knowledge_cells.version + 1
+                """;
+            ins.Parameters.AddWithValue("$cell", newCellName);
+            ins.Parameters.AddWithValue("$key",  newKey);
+            ins.Parameters.AddWithValue("$val",  cur.Value);
+            ins.Parameters.AddWithValue("$now",  DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+            ins.ExecuteNonQuery();
+        }
+        tx.Commit();
     }
 
     public int Delete(string cellName, string? key = null)
@@ -184,11 +255,12 @@ public sealed class KnowledgeCell : IDisposable
             else
             {
                 cmd.CommandText = """
-                    INSERT INTO knowledge_cells (cell_name, key, value, updated_at)
-                    VALUES ($cell, $key, $val, $ua)
+                    INSERT INTO knowledge_cells (cell_name, key, value, updated_at, version)
+                    VALUES ($cell, $key, $val, $ua, 1)
                     ON CONFLICT(cell_name, key) DO UPDATE SET
                         value      = excluded.value,
-                        updated_at = excluded.updated_at
+                        updated_at = excluded.updated_at,
+                        version    = knowledge_cells.version + 1
                     """;
                 cmd.Parameters.AddWithValue("$val", prevValue);
                 cmd.Parameters.AddWithValue("$ua",  prevUpdatedAt ?? DateTimeOffset.UtcNow.ToUnixTimeSeconds());
@@ -283,3 +355,5 @@ public sealed class KnowledgeCell : IDisposable
 
     public void Dispose() => _db.Dispose();
 }
+
+public sealed record KcellEntry(string Value, long UpdatedAt, long Version);
